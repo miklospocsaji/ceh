@@ -17,7 +17,7 @@ From M2, every state runs as a Fargate task from one `factory-worker` image (bri
   - the RDS CA bundle
 - `bubblewrap` and `socat`, although no role in the image uses Bash (amended 2026-11-06, owner decision). The runner requires the sandbox for every role (ADR 0007). Without these binaries the SDK refuses to start any session, so the proposal author could not run. With them, sessions start, and every Bash command fails, because the sandbox cannot create its namespaces in a container with no added privileges. No Playwright until M4.
 - `pnpm deploy` is not used, because it copies workspace packages into `node_modules`, where type stripping refuses them.
-- `factory/worker/Dockerfile.dockerignore` is an allowlist, with the repository root as build context. `.env*`, `docs/`, `app/fixtures/`, `.git` and `node_modules` never enter it.
+- `factory/worker/Dockerfile.dockerignore` is an allowlist, with the repository root as build context. `.env*`, `docs/`, `.git` and `node_modules` never enter it.
 - Non-root user `factory` (uid 10001). `HOME` and the work directory are in the task's ephemeral storage.
 - Role configs and prompts come from the image, not the clone, so the image's commit is the factory's version.
 - The image is built and pushed by CDK's `DockerImageAsset` on `cdk deploy`, tagged by content hash. CI does not build it.

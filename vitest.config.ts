@@ -1,6 +1,6 @@
 import { defineConfig } from "vitest/config";
 
-const packages = "{app,factory}/*";
+const packages = "factory/*";
 const tests = [`${packages}/test/**/*`, "infra/test/**/*"];
 
 export default defineConfig({

@@ -1,10 +1,10 @@
-# Kindle Vocab Software Factory — Bootstrap Brief
+# ceh Software Factory — Bootstrap Brief
 
 Oct 25, 2026 · @Miki
 
 ## 1. Purpose and how to use this brief
 
-We are building an autonomous software factory first and a vocabulary app second. The app (section 6) is the factory's first workload. The factory is the thing being learned, measured and improved.
+ceh (Hungarian *céh*, "guild", said "tsay") is an autonomous software factory. It works on target repositories it does not live in; each target is described in `targets/<project>/`. Its first workload is the Kindle vocabulary app in `miklospocsaji/vocab`, whose product brief lives there (section 6). The factory is the thing being learned, measured and improved.
 
 **Learning goals for the owner**
 
@@ -69,7 +69,7 @@ Inside the build loop a failing gate goes to the classifier: bugs retry the task
 1. **Intake:** check the issue states a requirement; create the ledger row and a verb-led OpenSpec change id (for example `add-vocab-import`), which is also the branch name.
 2. **Proposal:** the proposal author writes `proposal.md` (why, what, impact) and delta specs (requirements with WHEN/THEN scenarios) under `openspec/changes/<id>/`, and tags the change `small`, `medium` or `large` as `x-complexity` in the change's `.openspec.yaml` (strict validation rejects unprefixed custom keys). Open questions go to the owner as an issue comment. `openspec validate <id> --strict` must pass.
 3. **Proposal approval (human):** the owner replies `/approve` or edits the files on the branch.
-4. **Design:** the architect writes `design.md` (components, data model, decisions, risks) and the code contracts in `app/contracts/`. Skipped for `small` changes.
+4. **Design:** the architect writes `design.md` (components, data model, decisions, risks) and the code contracts in the target's contracts path. Skipped for `small` changes.
 5. **Design review:** `large` changes wait for owner approval, `medium` changes get a fresh-context design-reviewer agent, `small` changes skip it.
 6. **Plan:** the planner writes `tasks.md` (numbered checklist) and a `tasks.json` result listing each task's dependencies, files, scenarios and tests. Every task must fit one implementer session.
 7. **Build loop, per task in order:** the test author writes failing tests for the task's scenarios, the implementer makes them pass, then the gates run. When they pass, the runner ticks the task in `tasks.md` and commits. A Step Functions Map state iterates the tasks; independent tasks may run in parallel later.
@@ -82,7 +82,7 @@ Failure loop: the classifier labels a failure as `flaky`, `bug`, `design-flaw`, 
 
 ### Artifacts and the OpenSpec layout
 
-OpenSpec is the format for intent, design and tasks, so the owner can read, edit or hand-run any stage with the normal OpenSpec workflow. One GitHub issue maps to one OpenSpec change.
+OpenSpec is the format for intent, design and tasks, so the owner can read, edit or hand-run any stage with the normal OpenSpec workflow. One GitHub issue maps to one OpenSpec change. A work item's change lives in the target's repository, in the target's own `openspec/` folder:
 
 ```
 openspec/
@@ -102,14 +102,14 @@ The scenarios in the delta specs are the acceptance criteria. Each test names th
 
 `openspec validate --strict` requires every change to contain at least one delta. A change that touches no requirements (pure tooling, refactor, docs) sets `skip_specs: true` in its `.openspec.yaml`.
 
-Factory capabilities are built through OpenSpec changes too, scoped per milestone. A change holds only what its milestone builds and is archived when that milestone exits, so `openspec/specs/` never describes behaviour that does not exist yet.
+Factory capabilities are built through OpenSpec changes too, in this repository's `openspec/` folder, scoped per milestone and written by the owner or a local Claude Code session, never by a factory role. A change holds only what its milestone builds and is archived when that milestone exits, so `openspec/specs/` never describes behaviour that does not exist yet.
 
 Results OpenSpec has no place for are small JSON artifacts with zod schemas in `factory/artifacts/`, stored in S3 by work item and attempt (in M2, the single result sits in the ledger on its attempt). They never go in the change folder.
 
 | Artifact | Produced by | Consumed by |
 | --- | --- | --- |
 | `proposal.md` + delta specs | Proposal author | Every later step |
-| `design.md` + `app/contracts/` | Architect | Planner, test author, implementer, reviewer |
+| `design.md` + the target's contracts | Architect | Planner, test author, implementer, reviewer |
 | `tasks.md` + `tasks.json` | Planner | Build loop |
 | Test diff per task | Test author | Implementer, gates |
 | Code diff per task, PR | Implementer | Gates, reviewer |
@@ -120,16 +120,16 @@ Results OpenSpec has no place for are small JSON artifacts with zod schemas in `
 
 ## 4. Role catalog
 
-Ten roles, each defined by one config file in `factory/roles/<role>.yaml` plus a prompt in `factory/roles/<role>.md` with no frontmatter (ADR 0012). All run as Agent SDK sessions through the role runner; the failure classifier is a session with no tools and structured output (owner, 2026-11-09). Models are starting defaults; tune them from benchmark results.
+Ten roles, each defined by one config file in `factory/roles/<role>.yaml` plus a prompt in `factory/roles/<role>.md` with no frontmatter (ADR 0012). All run as Agent SDK sessions through the role runner; the failure classifier is a session with no tools and structured output (owner, 2026-11-09). Models are starting defaults; tune them from benchmark results. Paths outside `openspec/changes/<id>/` are the target's: each target's `targets/<project>/target.yaml` sets its writable paths per role, its contracts path and its commands.
 
 | Role | Default model | Tools | May write | Output | Turn cap |
 | --- | --- | --- | --- | --- | --- |
 | Proposal author | `claude-opus-5-5` | Read, Grep, Glob, Edit, Write, WebFetch (GitHub only) | `openspec/changes/<id>/` except `design.md` and `tasks.md` | `proposal.md`, delta specs, `x-complexity` tag | 30 |
-| Architect | `claude-opus-5-5` | Read, Grep, Glob, Edit, Write | `openspec/changes/<id>/design.md`, `app/contracts/` | `design.md`, contracts | 40 |
+| Architect | `claude-opus-5-5` | Read, Grep, Glob, Edit, Write | `openspec/changes/<id>/design.md`, the target's contracts path | `design.md`, contracts | 40 |
 | Design reviewer | `claude-sonnet-5-5` | Read, Grep, Glob | nothing | `review.json` | 20 |
 | Planner | `claude-sonnet-5-5` | Read, Grep, Glob, Edit, Write | `openspec/changes/<id>/tasks.md` | `tasks.md`, `tasks.json` | 25 |
-| Test author | `claude-sonnet-5-5` | Read, Grep, Glob, Edit, Write, Bash | `app/*/test/`, `app/e2e/`, and stubs of the task's new source files | test diff for one task | 40 |
-| Implementer | `claude-sonnet-5-5` | Read, Grep, Glob, Edit, Write, Bash | `app/*/src/` except `app/contracts/`, `infra/app-stack.ts`, `infra/preview-stack.ts`, `infra/app/` (never tests or factory infrastructure) | code diff for one task | 60 |
+| Test author | `claude-sonnet-5-5` | Read, Grep, Glob, Edit, Write, Bash | the target's test paths, and stubs of the task's new source files | test diff for one task | 40 |
+| Implementer | `claude-sonnet-5-5` | Read, Grep, Glob, Edit, Write, Bash | the target's source paths except its contracts path, and the target's own infrastructure (never tests) | code diff for one task | 60 |
 | Reviewer | `claude-sonnet-5-5` | Read, Grep, Glob | nothing | `review.json` | 25 |
 | QA explorer | `claude-sonnet-5-5` | Playwright MCP, Read | the runner-provided screenshot directory only (outside the repo; the runner uploads it to S3) | `qa-report.json` + screenshots | 60 |
 | Failure classifier | `claude-haiku-5-5` | none: an Agent SDK session with structured output, input in prompt | nothing | `{kind, evidence}` | 3 |
@@ -150,8 +150,8 @@ Ten roles, each defined by one config file in `factory/roles/<role>.yaml` plus a
 - The runner reads `factory/roles/<role>.md` itself and passes it as the system prompt. Roles never get the Agent tool, so they cannot start subagents. No role prompt lives in `.claude/agents/`, so Claude Code never registers a role as a subagent (ADR 0012).
 - Each config says where the role runs: `runsIn: worker | build`. The runner refuses a `build` role anywhere but the build container. In M3 the test author and implementer run in the build container; every other role runs in the worker.
 - Every role starts from the change folder and the current `openspec/specs/` for the affected capabilities. Only the proposal author changes requirements and only the architect changes design. The implementer never edits `tasks.md`; the runner ticks a task once its gates pass.
-- Only roles in the build container have Bash, allowlisted per role as permission rules (`pnpm typecheck`, `pnpm lint`, `pnpm exec vitest run:*`, `git status:*`, `git diff:*`). No install, no network commands, no `git push`; the deterministic runner pushes. The SDK sandbox cannot start on Fargate (ADR 0007), so Bash can write anywhere in the clone. After the session a diff check against the starting commit fails the attempt if any path outside the role's globs changed, and the worker runs the same check on the patch before it commits (ADR 0011).
-- Writable globs may hold `!` exclusions (the implementer's `!app/contracts/**`) and the `{taskStubs}` placeholder, the task's source files that did not exist at the starting commit (the test author's stubs).
+- Only roles in the build container have Bash, allowlisted per role as permission rules: the target's typecheck, lint and unit commands from its `target.yaml`, plus `git status:*` and `git diff:*`. No install, no network commands, no `git push`; the deterministic runner pushes. The SDK sandbox cannot start on Fargate (ADR 0007), so Bash can write anywhere in the clone. After the session a diff check against the starting commit fails the attempt if any path outside the role's globs changed, and the worker runs the same check on the patch before it commits (ADR 0011).
+- Writable globs may hold `!` exclusions (the implementer's exclusion of the target's contracts path) and the `{taskStubs}` placeholder, the task's source files that did not exist at the starting commit (the test author's stubs).
 - The role returns its JSON result as structured output (`outputFormat` built from its zod schema with `z.toJSONSchema`, targeting draft-07, because the CLI rejects zod's default 2020-12 `$schema`). The runner re-parses `structured_output` with zod and validates any OpenSpec files with `openspec validate <id> --strict`. Invalid output, or any non-`success` result subtype, counts as a failed attempt.
 - Every SDK message is streamed to the ledger with token usage, so cost per role, per task and per work item is always known. Cost comes from the result's `modelUsage` and `total_cost_usd`, which are estimates in both auth modes. The auth mode comes from the init message's `apiKeySource`.
 - Prompts receive only artifacts, never other roles' transcripts.
@@ -208,13 +208,13 @@ export async function runRole(role: RoleConfig, item: WorkItem): Promise<Artifac
 
 ## 5. Stack, repo layout, infrastructure and security
 
-One TypeScript monorepo holds the factory, the app and all infrastructure; everything deploys to one AWS account with CDK.
+One TypeScript monorepo holds the factory, its infrastructure and its target configs. The targets it works on live in their own repositories and choose their own stacks. The factory deploys to one AWS account with CDK.
 
 ### Stack
 
 | Area | Choice |
 | --- | --- |
-| Language | TypeScript 6.0 (strict) everywhere, Node 24 LTS. TypeScript 7 waits until typescript-eslint supports it. |
+| Language | TypeScript 6.0 (strict), Node 24 LTS. TypeScript 7 waits until typescript-eslint supports it. |
 | Package manager | pnpm workspaces; exact versions pinned for the Agent SDK (0.x) and the OpenSpec CLI |
 | Lint | ESLint (flat config) + typescript-eslint |
 | Agents | `@anthropic-ai/claude-agent-sdk` for every role, the classifier included; `@anthropic-ai/sdk` for Batch API calls; Anthropic API key in SSM Parameter Store |
@@ -222,11 +222,8 @@ One TypeScript monorepo holds the factory, the app and all infrastructure; every
 | Orchestration | AWS Step Functions (Standard workflows, JSONata), Map state for the per-task loop |
 | Agent compute | ECS Fargate tasks from one `factory-worker` image in ECR, and its `build` target for the roles with Bash |
 | Infrastructure | AWS CDK v2 (TypeScript) |
-| App frontend | React + Vite PWA, responsive for desktop and mobile; S3 + CloudFront |
-| App backend | API Gateway + Lambda; Postgres on Aurora Serverless v2 |
-| Auth | Amazon Cognito |
-| Validation | zod for every JSON result, API payload, contract and config |
-| Tests | Vitest (unit), Playwright (e2e and QA) |
+| Validation | zod for every JSON result and config |
+| Tests | Vitest (unit); Playwright for the QA role |
 | Forge | GitHub: issues as the backlog, PRs as the unit of change, a GitHub App for the factory |
 
 ### Repo layout
@@ -252,96 +249,33 @@ One TypeScript monorepo holds the factory, the app and all infrastructure; every
 │   ├── lessons/              # curated lessons written by the retro role
 │   ├── benchmark/            # reference tasks + runner + results
 │   └── worker/               # Dockerfile for factory-worker and its build target
-├── app/
-│   ├── contracts/            # zod/OpenAPI contracts written by the architect
-│   ├── web/                  # React PWA
-│   ├── api/                  # Lambda handlers
-│   ├── domain/               # pure domain logic (FSRS scheduling, import parsing)
-│   ├── e2e/                  # Playwright tests
-│   └── fixtures/             # sample vocab.db, sample EPUB
-├── evals/
-│   └── enrichment/           # word-in-context translation eval set
+├── targets/
+│   └── <project>/            # one folder per target repository (from M3.25)
+│       ├── target.yaml       # repository, owner, commands, writable paths per role, contracts path, budget
+│       └── build.Dockerfile  # the target's toolchain on top of ceh's build base
 └── infra/
-    ├── factory-stack.ts      # never written by factory roles
-    ├── app-stack.ts
-    ├── preview-stack.ts      # one instance per PR
-    └── app/                  # constructs shared by the app and preview stacks
+    └── factory-stack.ts      # never written by factory roles
 ```
 
 ### Environments
 
 - **Factory:** one long-lived stack (Step Functions, Fargate cluster, ledger, webhook Lambda).
-- **Preview:** one app stack per open PR, named `pr-<number>`, destroyed on merge or close.
-- **Production:** one app stack, deployed only by the Release state.
+- **Preview:** one stack of the target's app per open PR, named `pr-<number>`, destroyed on merge or close.
+- **Production:** one stack of the target's app, deployed only by the Release state.
 - **Region:** every stack lives in eu-central-1. The one exception is a small certificate stack in us-east-1 for the CloudFront certificates, referenced with CDK cross-region references.
 
 ### Security
 
 - Worker tasks run in the public subnets of a small VPC, with a public IP and no inbound access. Aurora has no public address and accepts connections only from the worker. There is no network-level egress control (owner decision, section 8): the Bash allowlist, per-role `WebFetch` domain rules, a read guard and a spend-limited API key limit what an agent can reach and leak. The SDK's Bash sandbox cannot start in a container with no added privileges (ADR 0007), so no role in the worker has Bash.
 - Roles with Bash run in the build container, which holds only the model credential and refuses to start if any other factory credential is in its environment (ADR 0011). It clones the branch with no token and never pushes. Agent-written code there can read the model credential and send it anywhere; the owner accepts that risk (section 8). The worker checks every patch's paths before it commits.
-- Each worker task gets a short-lived GitHub App installation token scoped to this repo, and no AWS credentials beyond reporting to its own execution and, from M3, reading its inputs and writing its artifacts. A build task gets no GitHub token, and AWS access only to its work item's artifacts. Deploys use a separate deployer role that agents never hold.
+- Each worker task gets a short-lived GitHub App installation token scoped to the target's repository, and no AWS credentials beyond reporting to its own execution and, from M3, reading its inputs and writing its artifacts. A build task gets no GitHub token, and AWS access only to its work item's artifacts. Deploys use a separate deployer role that agents never hold.
 - Agent-visible content from issues, web pages or the app under test is data, never instructions. Role prompts say so, and hooks, permission rules, the sandbox (worker) and the diff check (build container) enforce the path and command allowlists regardless.
-- No factory role may change factory infrastructure (`infra/factory-stack.ts` and its constructs) through a work item. It changes only through the owner or a local Claude Code session.
+- No work item changes the factory: work items run on a target's repository, never on this one, and target configs are outside every target's reach. `ceh` changes only through the owner or a local Claude Code session; the retro role's lesson PRs (M7) are reviewed by the owner like any other.
 - Monthly AWS budget alarm and a per-work-item token budget; exceeding either pauses the execution and notifies the owner.
 
 ## 6. First workload: the Kindle vocabulary app
 
-A responsive web app where learners upload the words they looked up on their Kindle and practise them with the book context, a translation into their own language and dictionary examples.
-
-### Users and trajectories
-
-- A **user** has an account and a mother language (the owner's is Hungarian).
-- A user has one or more **learning trajectories**. A trajectory maps one foreign language (the books' language) to the user's own language, for example German → Hungarian.
-- Kindle **word collections** are uploaded into a trajectory. An upload can contain several books; words are filed under the trajectory matching the book's language.
-
-### Every word must carry
-
-1. The **book** it came from (title, author).
-2. Its **contexts**: every sentence where the user looked it up, and the surrounding paragraph when the book text is available.
-3. **Translations** into the trajectory's own language, with the sense matched to each context.
-4. **Dictionary example sentences** in the foreign language, with translations.
-
-### Source data
-
-The Kindle stores lookups in `system/vocabulary/vocab.db`, a SQLite file the user copies over USB. Expected tables (verify against the real fixture before coding):
-
-| Table | Key columns | Use |
-| --- | --- | --- |
-| `WORDS` | `id`, `word`, `stem`, `lang`, `timestamp` | The looked-up word and its lemma |
-| `LOOKUPS` | `word_key`, `book_key`, `usage`, `timestamp` | One lookup; `usage` is the sentence context |
-| `BOOK_INFO` | `id`, `title`, `authors`, `lang` | The book |
-
-Real files usually carry more: `BOOK_INFO.asin` and `guid`, `WORDS.profileid`, `LOOKUPS.dict_key` and `pos`, and the tables `DICT_INFO`, `METADATA` and `VERSION`. `WORDS.id` and `LOOKUPS.word_key` look like `en:word`, and timestamps are epoch milliseconds. The fixture script strips the identifying ones: ASINs, GUIDs, profile and device IDs, and `METADATA` values.
-
-- The sentence context comes free in `LOOKUPS.usage`. Paragraph context needs the book text, so the user may optionally upload a DRM-free EPUB of the same book; the importer then locates each sentence and stores its paragraph.
-- Re-uploading a newer `vocab.db` must be idempotent: only new lookups are added.
-
-### Enrichment pipeline
-
-- Runs asynchronously after upload (S3 → SQS → Lambda), never on the read path.
-- For each new word in context, one Claude call (Batch API where latency allows) returns: lemma, part of speech, the sense used in this context, its translation into the own language, and 2–3 graded example sentences with translations.
-- Ground with open data where available (Wiktionary extracts via kaikki.org, Tatoeba sentence pairs) and record which source each item came from.
-- Quality is measured by `evals/enrichment/`: about 50 word-in-context cases per language pair with the expected Hungarian sense. Any prompt or model change must not lower the score.
-
-### Practice
-
-- Scheduling uses FSRS (via the `ts-fsrs` library); never a home-made algorithm.
-- A review shows the word in the user's own book sentence first, then reveals translation and examples.
-- Users can filter practice by trajectory and by book, and mark words as known or as ignored.
-
-### UX process
-
-- The owner wants alternatives, not a single design. Before the first UI milestone the factory produces three distinct directions as clickable prototypes, for desktop and mobile. Starting candidates:
-  - **Context-first cloze:** the book sentence with the word blanked; reveal gives translation and examples.
-  - **Mobile swipe triage:** swipe to mark known or to drill, feeding FSRS.
-  - **Book shelf:** each book is a deck with progress; practise words from the book being read now.
-- The owner picks or blends one. The result is frozen as a design system (tokens, components, layouts) that implementers must follow; the QA agent checks screenshots against it.
-
-### Non-functional
-
-- Works on current mobile Safari and Chrome and on desktop browsers; installable as a PWA.
-- Importing a 2,000-word `vocab.db` completes, including enrichment, within 15 minutes.
-- Personal data stays in one AWS region (eu-central-1).
+The app lives in `miklospocsaji/vocab`, with its product brief (`docs/brief.md` there), its issues and its own decisions. What `ceh` knows about it is in `targets/vocab/`. The milestones below still name their `vocab` workload, since that is how the factory proves each one.
 
 ## 7. Milestones
 
@@ -416,7 +350,7 @@ Ten milestones, each ending in a working end-to-end path; app features enter as 
    - Workload: auth with Cognito, trajectories CRUD, upload of `vocab.db` with a minimal unstyled UI.
    - Exit: on a PR with a deliberately seeded UI bug, the QA agent or reviewer catches it; after a merge, the change is archived and `openspec/specs/` reflects it.
 8. **M5 UX directions**
-   - Deliverables: three clickable prototype directions (section 6) for desktop and mobile, linked from an issue; owner choice recorded in an ADR; design system (tokens, components, layouts) committed; QA checks screenshots against it.
+   - Deliverables: three clickable prototype directions (from `vocab`'s product brief) for desktop and mobile, linked from an issue; owner choice recorded in an ADR; design system (tokens, components, layouts) committed; QA checks screenshots against it.
    - Exit: the owner has picked a direction and the existing UI is restyled by the factory to match.
 9. **M6 Enrichment, practice and the factory console**
    - Workload: enrichment pipeline with the `evals/enrichment/` gate; FSRS practice flow; filters by trajectory and book.
@@ -438,17 +372,12 @@ Decided on 26–27 October 2026. Claude Code treats these as requirements and re
 - [ ] **Preview database (M4):** a full Aurora cluster per PR is slow (about 10 minutes) and costly. Recommendation: previews share the app cluster with one database per PR, dropped when the PR closes.
 - [x] **Model billing (M1):** local runs use the subscription's Agent SDK credit; cloud runs (M2 onwards) use an Anthropic API key. The role runner supports both auth modes by config, and the ledger records which mode each run used, since subscription runs have no exact per-call price (record tokens, estimate cost).
 - [x] **Ledger store (M0):** a dedicated Aurora Serverless v2 Postgres cluster with auto-pause, separate from the app's.
-- [x] **Capabilities (M0):** app: `vocab-import`, `trajectories`, `enrichment`, `practice`, `auth`. Factory: `orchestration`, `roles`, `gates`. The factory capabilities are specified in OpenSpec from M0, so Claude Code builds the factory through OpenSpec changes too.
+- [x] **Capabilities (M0):** `orchestration`, `roles`, `gates`. They are specified in OpenSpec from M0, so Claude Code builds the factory through OpenSpec changes too. A target's capabilities are its own decision.
 - [x] **Complexity rules (M3):** small = one capability, no schema or contract change; medium = a contract or schema change within one capability; large = several capabilities, new infrastructure, or anything touching auth or security.
 - [x] **Auto-merge policy (M4):** small changes merge themselves on green gates, an approving review and a clean QA report; medium and large changes wait for the owner.
 - [x] **Budget limits (M2, changed 2 November 2026):** $50 a month AWS budget alarm, covering the whole shared AWS account; $20 a month Anthropic workspace limit; $5 model spend per work item.
-- [x] **Languages (M3):** English → Hungarian first; the enrichment eval set starts with this pair.
-- [x] **Users (M4):** owner only. Admin-created Cognito users, no sign-up page; the data model stays multi-user.
 - [x] **Bash roles (M3, 8 November 2026):** roles with Bash (test author, implementer) run in a build container that holds only the model credential (ADR 0011). A test author and implementer without Bash were rejected. Accepted risk: agent-written code there can read the model credential and, with no egress control, send it anywhere; in the cloud that is the spend-limited, revocable API key.
 - [x] **Role prompts (M3, 8 November 2026):** prompts live at `factory/roles/<role>.md` with no frontmatter, and `.claude/agents/` is removed, so Claude Code never registers a factory role as a subagent (ADR 0012).
 - [x] **Failure classifier (M3, 9 November 2026):** an Agent SDK session with no tools, a cap of 3 turns and structured output, instead of a Messages API call, so it runs in both auth modes and is recorded like every other role.
 - [x] **Local build runs (M3, 9 November 2026):** local runs of the build container keep the subscription token (ADR 0006). Accepted risk: agent-written code in the container can read it, and it has no spend limit of its own.
 - [x] **Factory repository (M3.25, 14 November 2026):** the factory becomes `ceh`, a public repository, named for several projects but shipping one target. Target configs and per-target build Dockerfiles live in `ceh`, never in the target. Build images carry only the toolchain; dependencies are installed online before each session. The packages, the GitHub App and the resource tag are renamed to `ceh`; the stack keeps the name `Factory`. Old work items are closed and refiled rather than resumed. The split comes first, then the target-aware change.
-- [x] **Fixture data (M0):** an anonymised copy in git, produced by a committed script that keeps the structure and real sentences from a few books and strips device IDs and ASINs.
-- [x] **UX direction (M5):** decide after the three prototypes; no leaning before then.
-- [x] **Domain (M4):** web app at `vocab.logtion.app`, API at `api.vocab.logtion.app`. The owner's domain `logtion.app` delegates `vocab.logtion.app` to a Route 53 hosted zone in the app's AWS account (NS records added at the owner's DNS). Previews live at `pr-<n>.vocab.logtion.app` and `api.pr-<n>.vocab.logtion.app`. Certificates come from ACM with DNS validation; the CloudFront certificate must be issued in us-east-1, while the API certificate lives in eu-central-1.

@@ -192,16 +192,6 @@ importers:
         specifier: 5.0.5
         version: 5.0.5(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))
 
-  app/contracts:
-    dependencies:
-      zod:
-        specifier: 4.6.7
-        version: 4.6.7
-
-  app/domain: {}
-
-  app/fixtures: {}
-
   factory/artifacts:
     dependencies:
       zod:
