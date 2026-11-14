@@ -1,10 +1,10 @@
 # 0004 OpenSpec usage and capabilities
 
-Status: accepted (2026-10-27; owner decisions of 2026-10-26 and 2026-10-27)
+Status: accepted (2026-10-27; owner decisions of 2026-10-26 and 2026-10-27; split by content on 2026-11-14, when the factory moved to its own repository, ADR 0013)
 
 ## Context
 
-OpenSpec is the format for intent, design and tasks, for the app and for the factory itself. OpenSpec 1.15 differs from what the brief first assumed:
+OpenSpec is the format for intent, design and tasks: for every work item, in the target's repository, and for the factory itself, in this one. OpenSpec 1.15 differs from what the brief first assumed:
 - `openspec init` writes `openspec/config.yaml` (context and per-artifact rules) instead of a project conventions file.
 - Each change has a `.openspec.yaml` metadata file, and `--strict` rejects unknown keys unless they are prefixed with `x-`.
 - A change must contain at least one delta unless it sets `skip_specs: true`.
@@ -12,11 +12,9 @@ OpenSpec is the format for intent, design and tasks, for the app and for the fac
 
 ## Decision
 
-- Capabilities:
-  - App: `vocab-import`, `trajectories`, `enrichment`, `practice`, `auth`.
-  - Factory: `orchestration`, `roles`, `gates`.
-  - New capabilities need an owner decision.
-- Changes are scoped per milestone. A change holds only what its milestone builds and is archived (`openspec archive <id> --yes`) when that milestone exits, so `openspec/specs/` never describes behaviour that does not exist yet.
+- The factory's capabilities are `orchestration`, `roles` and `gates`. New ones need an owner decision. A target names its own capabilities in its own `openspec/config.yaml`.
+- In a target, the factory writes one change per issue under the target's `openspec/changes/<id>/` and validates it with `openspec validate <id> --strict`.
+- The factory's own changes are scoped per milestone. A change holds only what its milestone builds and is archived (`openspec archive <id> --yes`) when that milestone exits, so `openspec/specs/` never describes behaviour that does not exist yet.
 - The complexity tag lives in `.openspec.yaml` as `x-complexity: small | medium | large`.
 - Tests name the scenario they prove by putting the exact scenario title in the test name, for example `it("Scenario: Re-import adds only new lookups", …)`. Scenario titles are unique within a change. The coverage gate (M3) matches on this.
 - The OpenSpec CLI is a pinned dev dependency; `pnpm openspec …` is the only way scripts and CI call it.

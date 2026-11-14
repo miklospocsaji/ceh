@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Kindle Vocab Software Factory. `docs/brief.md` is the source of truth; decisions live in `docs/adr/`.
+ceh, a software factory that works on target repositories it does not live in. `docs/brief.md` is the source of truth; decisions live in `docs/adr/`.
+
+M3.25 is in progress (brief section 7). Until its step 3 lands, the factory still assumes it lives in its target's repository (`app/` paths, `pnpm typecheck:app` and `pnpm lint:app` in the role configs and gates), so no work item runs, locally or in the cloud.
 
 ## Commands
 
@@ -8,7 +10,6 @@ Kindle Vocab Software Factory. `docs/brief.md` is the source of truth; decisions
 - `pnpm db:up`: starts the local ledger (Postgres in Docker, port 54329). Run it before `pnpm check` or `pnpm factory`: ledger-backed tests read `FACTORY_DATABASE_URL` and fail, never skip, if it is unset
 - `pnpm check`: all gates: typecheck, lint, unit tests, `openspec validate --all --strict`
 - `pnpm test` / `pnpm lint` / `pnpm typecheck` / `pnpm spec:validate`: single gates
-- `pnpm typecheck:app` / `pnpm lint:app`: the app's typecheck and lint only. The build gates and the build roles run these, never the whole repository's: whole-repo typed lint does not fit the build task. Work-item branches are cut from `master`, so anything the gates rely on must be on `master` first
 - `pnpm gates coverage --change <id> --tests <dir>`: the scenario coverage gate for a change. For the factory's own changes use `--tests factory`, and `--tests infra` for the stack's scenarios
 - `pnpm test:live`: real Agent SDK sessions with small budgets (`*.live.test.ts`); never in `pnpm check` or CI
 - `pnpm test:docker`: tests that build and run the worker image (`*.docker.test.ts`); never in `pnpm check` or CI. Needs Docker
@@ -23,7 +24,6 @@ Kindle Vocab Software Factory. `docs/brief.md` is the source of truth; decisions
 
 - `openspec/`: specs (`specs/`), active changes (`changes/`), conventions (`config.yaml`)
 - `docs/`: brief and ADRs
-- `app/fixtures/`: anonymised Kindle `vocab.db` fixtures and the script that makes them
 - `factory/roles`: role configs (`*.yaml` + prompt) and the role runner on the Agent SDK
 - `factory/artifacts`: zod schemas for role results
 - `factory/ledger`: Postgres migrations, typed queries and the `LedgerRecorder`
@@ -33,7 +33,6 @@ Kindle Vocab Software Factory. `docs/brief.md` is the source of truth; decisions
 - `factory/cli`: the `pnpm factory` entry point (`src/main.ts`)
 - `factory/worker`: the image (targets `worker`, `build`, `boundary-check`) and its entry points: `factory-worker`, which runs one state per task, and `factory-build`, which runs one test-author or implementer session or a gates-only run per task
 - `infra`: the factory's CDK app (`bin/factory.ts`) and its one stack, `factory-stack.ts`: VPC with public subnets only, Aurora ledger, artifact bucket, worker, build and boundary-check task definitions, state machine, webhook Lambda, budget. Non-secret settings are in `cdk.json` context. Factory roles never write it
-- `app/*`: see brief section 5; packages appear as milestones need them
 
 ## Cloud runs
 
@@ -55,4 +54,4 @@ Kindle Vocab Software Factory. `docs/brief.md` is the source of truth; decisions
 - TypeScript is strict and erasable-only (no enums, namespaces or parameter properties), so `node file.ts` runs it directly.
 - Pin dependencies exactly (`--save-exact`); the Agent SDK and OpenSpec are upgraded deliberately.
 - Record significant decisions as ADRs: `docs/adr/NNNN-title.md`.
-- Never commit secrets or `docs/vocab.db`.
+- Never commit secrets.

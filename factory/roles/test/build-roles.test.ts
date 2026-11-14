@@ -1,15 +1,9 @@
-// The M3 session roles (add-build-roles task 2.12): each config pinned to design.md's table, and
-// the lint rule the test author's stubs rely on. The classifier's config is pinned in
-// classifier.test.ts, the proposal author's in proposal-author.test.ts.
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+// The M3 session roles (add-build-roles task 2.12): each config pinned to design.md's table.
+// The classifier's config is pinned in classifier.test.ts, the proposal author's in
+// proposal-author.test.ts.
 import { DesignResult, ImplementationResult, PlanResult, ReviewResult, TestResult } from "@vocab/factory-artifacts";
-import { ESLint } from "eslint";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { loadRole } from "../src/config.ts";
-
-const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 
 const READ_ONLY = ["Read", "Grep", "Glob"];
 const EDITING = [...READ_ONLY, "Edit", "Write"];
@@ -135,55 +129,5 @@ describe("the M3 session roles", () => {
       // The prompt names only the app's commands: a whole-repository lint does not fit the build task.
       expect(role.prompt).not.toMatch(/`pnpm (typecheck|lint)`/);
     }
-  });
-});
-
-/** One sync and one async stub, as the test author writes them under `app/domain/src/`. */
-const STUB = `export function countWords(_text: string, _locale: string): number {
-  throw new Error("not implemented");
-}
-
-export function loadBook(_path: string, _limit: number): Promise<string[]> {
-  return Promise.reject(new Error("not implemented"));
-}
-`;
-
-describe("linting the test author's stubs", () => {
-  // A copy of the repo's lint setup in a temp dir, since the type-aware rules only lint files on
-  // disk that a tsconfig includes, and the real app/ and factory/ trees stay untouched.
-  let root: string;
-  let eslint: ESLint;
-
-  beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), "vocab-stub-lint-"));
-    for (const file of ["eslint.config.js", "tsconfig.base.json", "app/domain/tsconfig.json", "factory/roles/tsconfig.json"]) {
-      mkdirSync(dirname(join(root, file)), { recursive: true });
-      copyFileSync(join(REPO_ROOT, file), join(root, file));
-    }
-    symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"), "dir");
-    for (const dir of ["app/domain/src", "factory/roles/src"]) {
-      mkdirSync(join(root, dir), { recursive: true });
-      writeFileSync(join(root, dir, "stub.ts"), STUB);
-    }
-    eslint = new ESLint({ cwd: root });
-  });
-
-  afterAll(() => {
-    rmSync(root, { recursive: true, force: true });
-  });
-
-  it("a sync and an async stub with _ parameters pass under app/domain/src/", { timeout: 60_000 }, async () => {
-    const [result] = await eslint.lintFiles(["app/domain/src/stub.ts"]);
-    expect(result?.messages.map((message) => `${String(message.ruleId)}: ${message.message}`)).toEqual([]);
-    expect(result?.errorCount).toBe(0);
-  });
-
-  it("the same stub under factory/ still fails on its unused parameters", { timeout: 60_000 }, async () => {
-    const [result] = await eslint.lintFiles(["factory/roles/src/stub.ts"]);
-    const rules = result?.messages.map((message) => message.ruleId) ?? [];
-    expect(rules).toContain("@typescript-eslint/no-unused-vars");
-    expect(rules.filter((rule) => rule === "@typescript-eslint/no-unused-vars")).toHaveLength(4);
-    // Only the unused-parameter rule: the stubs are otherwise clean, so this is the rule under test.
-    expect(new Set(rules)).toEqual(new Set(["@typescript-eslint/no-unused-vars"]));
   });
 });
