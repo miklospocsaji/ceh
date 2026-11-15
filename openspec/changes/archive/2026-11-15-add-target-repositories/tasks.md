@@ -88,15 +88,16 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
   - Stack is tagged for ceh
 - [x] 8.3 Write ADR 0014 (target configs) and the amendments to ADR 0003 and ADR 0010.
 - [x] 8.4 Update `CLAUDE.md` (commands, repo map, the bot's name, the image tag, no "no work item runs" note), `openspec/config.yaml` if a convention changed, and the brief (sections 4 and 5 where they describe what this change built differently, and `ceh-app[bot]` where M3.25 says `ceh[bot]`).
-- [ ] 8.5 Run `pnpm check`, `pnpm gates coverage --change add-target-repositories --tests factory` and `--tests infra`, `pnpm test:docker`, and `pnpm test:live` (the boundary tests, and one local `pnpm factory run --until proposal` against a throwaway `vocab` issue the owner agrees to). Record the results in `design.md`.
+- [x] 8.5 Run `pnpm check`, `pnpm gates coverage --change add-target-repositories --tests factory` and `--tests infra`, `pnpm test:docker`, and `pnpm test:live` (the boundary tests, and one local `pnpm factory run --until proposal` against a throwaway `vocab` issue the owner agrees to). Record the results in `design.md`.
   - Done 2026-11-15: `pnpm check`, both coverage runs and `pnpm test:docker`, recorded in `design.md` ("Results").
-  - Open: `pnpm test:live` and the local run against a `vocab` issue, which spend model budget and write to GitHub; the owner says when.
+  - Done 2026-11-15: the local run against `vocab` issue #19, recorded in `design.md` ("Results").
+  - Done 2026-11-15: `pnpm test:live`, after moving the role live tests' vocab files into a fixture; recorded in `design.md` ("Results").
 
 ## 9. Step 4: deploy and exit run
 
 - [x] 9.1 Owner: rename the GitHub App. Done 2026-11-14 (`ceh-app`).
-- [ ] 9.2 Run `pnpm infra:diff`. It must show the new images, the tag on every resource, the App slug and the new task environment, and no replacement of the ledger, the bucket or any other stateful resource. Show the diff to the owner.
-- [ ] 9.3 Owner confirms; `pnpm infra:deploy`. The first worker task applies migration 0004.
-- [ ] 9.4 Run `pnpm test:cloud`. Scenarios carried from earlier changes: Boundaries hold in Fargate, Build boundaries hold in Fargate.
-- [ ] 9.5 Exit run: the owner files a fresh small `vocab` issue and labels it `factory`. Follow it to a pull request opened by the renamed bot, with every task built in vocab's build image and its gates green. Record each session's `installMs`, the cost and the wall time in `design.md`.
-- [ ] 9.6 Tick M3.25 in the brief, update `CLAUDE.md`, and archive this change (`pnpm exec openspec archive add-target-repositories --yes`).
+- [x] 9.2 Run `pnpm infra:diff`. It must show the new images, the tag on every resource, the App slug and the new task environment, and no replacement of the ledger, the bucket or any other stateful resource. Show the diff to the owner.
+- [x] 9.3 Owner confirms; `pnpm infra:deploy`. The first worker task applies migration 0004.
+- [x] 9.4 Run `pnpm test:cloud`. Scenarios carried from earlier changes: Boundaries hold in Fargate, Build boundaries hold in Fargate.
+- [x] 9.5 Exit run: the owner files a fresh small `vocab` issue and labels it `factory`. Follow it to a pull request opened by the renamed bot, with every task built in vocab's build image and its gates green. Record each session's `installMs`, the cost and the wall time in `design.md`.
+- [x] 9.6 Tick M3.25 in the brief, update `CLAUDE.md`, and archive this change (`pnpm exec openspec archive add-target-repositories --yes`).
