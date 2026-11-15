@@ -69,10 +69,10 @@ In `red` mode, the gates SHALL pass only if typecheck and lint pass, at least on
 - **THEN** the red gate fails, and its output names that test
 
 ### Requirement: Every scenario has a test
-The coverage check SHALL read the scenario titles from the change's delta specs and SHALL report every title, from all of them or from a given subset, that no test name under `app/` contains verbatim as `Scenario: <title>`. Coverage SHALL fail when any title is missing.
+The coverage check SHALL read the scenario titles from the change's delta specs and SHALL report every title, from all of them or from a given subset, that no test name under the target's coverage test directory contains verbatim as `Scenario: <title>`. Coverage SHALL fail when any title is missing.
 
 #### Scenario: Scenario without a test fails coverage
-- **WHEN** a change's delta spec has a scenario "Re-import adds only new lookups" and no test under `app/` names it
+- **WHEN** a change's delta spec has a scenario "Re-import adds only new lookups" and no test under the target's coverage test directory names it
 - **THEN** coverage fails, and its result lists "Re-import adds only new lookups" as missing
 
 #### Scenario: Coverage checks only the given scenarios
@@ -91,15 +91,19 @@ Each check's output in the result SHALL be at most 16 KB, keeping its end, and S
 - **THEN** that check's output in the result is at most 16 KB and ends with the check's last line
 
 ### Requirement: Gates run without the factory's services
-The gates SHALL run the tests under `app/` only, and SHALL need no ledger, network access or factory credentials.
+The gates SHALL run the target's tests only, and SHALL need no ledger, network access or factory credentials.
 
 #### Scenario: Gates run without a ledger
 - **WHEN** the green gates run with no `FACTORY_DATABASE_URL` and no credentials in the environment
-- **THEN** the `unit` check runs the app's tests only, and no factory test is reported
+- **THEN** the `unit` check runs the target's tests only, and no factory test is reported
 
-### Requirement: Gates check only the app's code
-The gates SHALL typecheck and lint only the app (the worktree's `typecheck:app` and `lint:app` scripts), never the factory's or the infrastructure's code. A whole-repository lint does not fit the build task's memory, and an app task has no business with factory code.
+### Requirement: Gates run the target's commands
+The gates SHALL run the typecheck, lint, unit and spec-validation commands of the target they are given, in the worktree and without a shell, and no script named by the factory. The unit check SHALL run the target's unit command on the target's unit test path. The spec check SHALL run the target's spec-validation command with `{changeId}` replaced by the change id.
 
-#### Scenario: Gates check only the app's code
-- **WHEN** the green gates run in a worktree whose app passes typecheck and lint and whose factory code has a lint error and a type error
-- **THEN** the `typecheck` and `lint` checks pass, and so do the gates
+#### Scenario: Gates run the target's commands
+- **WHEN** the green gates run for a target whose typecheck, lint and unit commands are stand-ins that record their arguments
+- **THEN** each of the `typecheck`, `lint` and `unit` checks ran its stand-in exactly once, the unit one with the target's unit test path as its last argument, and no `typecheck:app` or `lint:app` script ran
+
+#### Scenario: Spec check names the change
+- **WHEN** the green gates run for the change `add-demo` and a target whose spec-validation command is `pnpm exec openspec validate {changeId} --strict --no-interactive`
+- **THEN** the `spec` check ran `pnpm exec openspec validate add-demo --strict --no-interactive`

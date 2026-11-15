@@ -17,6 +17,11 @@ import { removeDir, writeFile, type LiveAttempt } from "./live-harness.ts";
 
 const REPO = resolve(import.meta.dirname, "../../..");
 const FIXTURE = join(import.meta.dirname, "fixtures/add-lookup-counts");
+/**
+ * What the roles read of `vocab`, copied from its `master` at eebbe67 (after the split, M3.25):
+ * the target's files are no longer in this repository.
+ */
+const VOCAB = join(import.meta.dirname, "fixtures/vocab");
 export const OPENSPEC = join(REPO, "node_modules/.bin/openspec");
 
 export const CHANGE_ID = "add-lookup-counts";
@@ -77,7 +82,7 @@ export function makeChangeRepo(design: DesignFixture): ChangeRepo {
     copyFileSync(from, join(root, to));
   };
   for (const path of ["openspec/config.yaml", "openspec/specs/vocab-import/spec.md", "app/contracts/src/index.ts", "app/domain/src/index.ts"]) {
-    copy(join(REPO, path), path);
+    copy(join(VOCAB, path), path);
   }
   for (const path of ["proposal.md", "specs/vocab-import/spec.md", ".openspec.yaml"]) copy(join(FIXTURE, path), `${CHANGE}/${path}`);
   if (design !== "none") {

@@ -207,7 +207,33 @@ Spike result (task 0.1, 2026-11-14): the assembled file builds its `target-build
 - `pnpm test:docker`: green, 11 tests: the worker image and vocab's build image, built from the assembled Dockerfile. The worker image refuses to run with no `FACTORY_TARGET` or an unknown one (exit 2), and the build image refuses an input for another target.
 - `pnpm infra:synth` with a placeholder budget address: synthesises 49 resources and three image assets (`factory/worker/Dockerfile`, its `boundary-check` stage, and `.build/vocab.Dockerfile` at `target-build`). No AWS call was made.
 - Found on the way: the Docker test "refuses an unknown state" named `design`, which became a real state in M3, so it had failed since then. It now names `deploy`.
-- Not run yet: `pnpm test:live` and a local `pnpm factory run` against a `vocab` issue. Both spend model budget and the second writes to GitHub, so they wait for the owner. `build-e2e.live.test.ts` now clones `miklospocsaji/vocab` from GitHub in place of this repository.
+- Local run: `pnpm factory run --issue 19 --until proposal` against the throwaway `vocab` issue #19 ("Reject a vocab.db that has no lookups"), unlabelled. The CLI cloned `vocab` into `~/.factory/targets/vocab/repo`, and the proposal author wrote `add-reject-a-vocab-db-that-has-no` (`proposal.md`, a `vocab-import` delta, `x-complexity: small`). The run pushed it as one commit authored `ceh <factory@ceh.invalid>`, posted the summary comment with two open questions, and stopped at `awaiting-proposal-approval`. Wall time 30 s; one attempt, 42,573 tokens, $0.17 estimated (subscription).
+- `pnpm test:live`: green, 30 tests in 10 files: the write, read and fetch boundaries, isolation and limits, the worker and build containers' boundaries, the seven session roles, and `build-e2e.live.test.ts`, which now clones `miklospocsaji/vocab` from GitHub and passes red then green in vocab's build image.
+- Found on the way: the architect, design-reviewer and planner live tests failed before any session, because `live-change.ts` copied vocab's `openspec/config.yaml`, `vocab-import` spec and `app/contracts` and `app/domain` entry points from this repository, where the split removed them. They are now a fixture, `factory/roles/test/fixtures/vocab/`, copied from `vocab`'s `master` at eebbe67 and left out of typecheck and lint.
+
+### Deploy (tasks 9.2 to 9.4, 2026-11-15)
+
+- `pnpm infra:diff`: the new worker, boundary-check and build images; `project=ceh` in place of `vocab-factory` on every resource; `FACTORY_GITHUB_APP_SLUG=ceh-app`; `FACTORY_TARGET=vocab` in place of `FACTORY_GITHUB_REPOSITORY` in the worker tasks, and added to the build tasks. The four task definitions get new revisions. The ledger, its secret, the bucket, the VPC and the log groups change only their tag; the budget "may be replaced" for its tag. The webhook's code and environment are unchanged. The owner saw it and confirmed.
+- `pnpm infra:deploy`: done in 83 s of stack update (167 s with the image pushes), with no execution running. Revisions: worker 10, boundary check 10, build 4, build boundary check 4.
+- `pnpm test:cloud`: green, 5 tests: Boundaries hold in Fargate, Build boundaries hold in Fargate, Unsigned webhook is rejected, and the checks that each boundary-check task stands for the deployed worker and build tasks.
+
+### Exit run (task 9.5, 2026-11-15)
+
+`vocab` issue #20, "Reject a vocab.db that has no lookups", labelled `factory`. Execution `issue-20-c693f7d0-…` succeeded and `ceh-app[bot]` opened `vocab` PR #21, whose CI (`check`, the app's gates only) passed.
+
+- Proposal: `small`, with two open questions. The issue had asked for no new error code, but the import error always carries one and none fit. The owner chose a new code `no-lookups`, edited the issue body and pushed a commit to the branch that adds it and sets `x-complexity: medium` (a contract change), then approved. Routing read the branch: Design, then the design reviewer.
+- Design (architect and design reviewer) 1 min 55 s, Plan 41 s, one task (1.1).
+- Build loop, every session in vocab's build image (build revision 4):
+
+  | Session | Build task | `installMs` | Result |
+  | --- | --- | ---: | --- |
+  | test-author 1 | 2 min 23 s | 2,097 | red failed: two scenarios described today's behaviour and passed already |
+  | test-author 2 | 1 min 54 s | 2,009 | red passed: each of those tests now also checks the no-lookups rejection |
+  | implementer 1 | 1 min 39 s | 2,002 | green passed: typecheck, lint, unit (33 tests), spec, coverage |
+
+  The online install costs about 2 s a session, so no warm store is needed for now. The Step tasks between builds end with exit 20 ("the next build's input is written"), which the execution history shows as `TaskFailed`.
+- Cost: $0.66 estimated, all `api-key`: proposal author $0.16, architect $0.18, design reviewer $0.04, planner $0.04, test author $0.19 (2 attempts), implementer $0.05.
+- Wall time: Intake and Proposal 2 min 42 s (Intake 1 min 14 s, a cold Aurora resume and migration 0004), the wait for approval 2 h 33 min, then approval to pull request 14 min 9 s.
 
 ## Decisions
 

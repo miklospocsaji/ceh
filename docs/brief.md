@@ -280,7 +280,7 @@ The app lives in `miklospocsaji/vocab`, with its product brief (`docs/brief.md` 
 
 ## 7. Milestones
 
-Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; M3.25 is settled, M3.5 is still a draft.
+Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; M3.25 is done, M3.5 is still a draft.
 
 1. **M0 Foundations**
    - Deliverables: monorepo with pnpm, strict TS, Vitest, lint; `openspec init` with project conventions filled in (`openspec/config.yaml`); `CLAUDE.md`; ADRs 0001–0005 (stack, orchestration, ledger store, OpenSpec usage and capabilities, fixture anonymisation); a basic GitHub Actions CI running the gates on every PR, including `openspec validate --all --strict`; an anonymised copy of the owner's real `vocab.db` in `app/fixtures/`, produced by a committed script; the approved OpenSpec changes for M1's `orchestration` and `roles` work.
@@ -295,7 +295,7 @@ Ten milestones, each ending in a working end-to-end path; app features enter as 
    - Deliverables: architect, design-reviewer, planner, test-author, implementer and failure-classifier roles; complexity routing (small skips design, medium gets the agent review, large waits for the owner); the per-task Map loop with gates, task ticking and retry with evidence (max 3); `design-flaw` routing back to Design and re-planning; scenario-coverage gate; PR opening by the deterministic runner.
    - First workload issue: the `vocab.db` importer in `app/domain/` (parse words, lookups and books; idempotent re-import), tested against the fixture.
    - Exit: the importer PR has every task in `tasks.md` ticked with green gates and no human edits to code or tests, and at least one `medium` change has passed through agent design review.
-5. **M3.25 Factory in its own repository (settled 14 November 2026)**
+5. **M3.25 Factory in its own repository (settled 14 November 2026, done 15 November 2026)**
    - Why: the factory and the app share one repository, so they also share one `openspec/` folder, gates, CI, branch protection and history. App roles see factory specs as context, and an app change could carry deltas to a factory capability. Every app task's gates run the factory's tests, and the build image holds the factory's source. None of this holds up for several or larger projects.
    - Name: the factory becomes **ceh** (Hungarian *céh*, "guild", said "tsay"), in the public repository `miklospocsaji/ceh`. It is built to serve several projects later, so nothing in it is named after `vocab`, but M3.25 ships one target only. Routing, budgets and cost reporting for several targets wait for a second project.
    - Principles:

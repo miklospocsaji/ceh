@@ -2,7 +2,7 @@
 
 ceh, a software factory that works on target repositories it does not live in. Each target is described in `targets/<name>/` (ADR 0014); the first is `vocab`. `docs/brief.md` is the source of truth; decisions live in `docs/adr/`.
 
-M3.25 is in progress (brief section 7): step 3 (the target-aware factory, change `add-target-repositories`) is built, step 4 (deploy and exit run) is not. Until that deploy, the stack in AWS is the pre-split one and its App slug is stale, so no cloud work item runs. Local runs work.
+M3.25 is done (brief section 7): the stack in AWS is deployed from this repository and works on `vocab`; its exit run was `vocab` issue #20. Next is M3.5, still a draft to settle in a fresh session.
 
 ## Commands
 
