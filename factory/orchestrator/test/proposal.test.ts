@@ -2,16 +2,22 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProposalResult } from "@vocab/factory-artifacts";
-import { FakeForge } from "@vocab/factory-forge/testing";
-import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, type WorkItemRow } from "@vocab/factory-ledger";
-import { createTestDatabase, type TestDatabase } from "@vocab/factory-ledger/testing";
-import { loadRole, renderPrompt, type Role } from "@vocab/factory-roles";
+import { ProposalResult } from "@ceh/factory-artifacts";
+import { FakeForge } from "@ceh/factory-forge/testing";
+import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, type WorkItemRow } from "@ceh/factory-ledger";
+import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
+import { loadRole, renderPrompt, type Role } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { worktreePath } from "../src/git.ts";
 import { intake } from "../src/intake.ts";
 import { MAX_PROPOSAL_ATTEMPTS, proposal, type ProposalContext } from "../src/proposal.ts";
 import { CHANGE_FILES, createFakeRoleRunner, validResult, type FakeStep } from "./fake-role-runner.ts";
+import { listTargets, loadTarget } from "@ceh/factory-target";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 const CHANGE_ID = "add-import-kindle-vocab-db";
 const CHANGE = `openspec/changes/${CHANGE_ID}`;
@@ -50,14 +56,14 @@ const remoteHead = (branch: string) => git(remote, "rev-parse", `refs/heads/${br
 
 /** Intake for issue 12, so the work item and its branch exist as Proposal finds them. */
 async function workItemInProposal(): Promise<WorkItemRow> {
-  const transition = await intake({ db: db.pool, forge }, { issueNumber: ISSUE.number });
+  const transition = await intake({ db: db.pool, forge, target: TARGET }, { issueNumber: ISSUE.number });
   if (transition.kind !== "advance") throw new Error(`intake did not advance: ${JSON.stringify(transition)}`);
   return transition.workItem;
 }
 
 function context(steps: FakeStep[]): { ctx: ProposalContext; calls: ReturnType<typeof createFakeRoleRunner>["calls"] } {
   const fake = createFakeRoleRunner(new LedgerRecorder(db.pool), steps);
-  return { ctx: { db: db.pool, forge, runRole: fake.runRole, role, repo, home }, calls: fake.calls };
+  return { ctx: { db: db.pool, forge, target: TARGET, runRole: fake.runRole, role, repo, home }, calls: fake.calls };
 }
 
 /** The issues of an `openspec validate --json` report. */
@@ -69,7 +75,7 @@ function validationMessages(evidence: string): string[] {
 beforeAll(async () => {
   db = await createTestDatabase("proposal");
   await migrate(db.pool);
-  role = await loadRole("proposal-author");
+  role = await loadRole("proposal-author", TARGET);
   return () => db.close();
 });
 
@@ -111,7 +117,7 @@ describe("proposal", () => {
 
     const transition = await proposal(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("awaiting-proposal-approval");
     expect(transition).toEqual({ kind: "advance", workItem: stored, result: validResult(CHANGE_ID) });
 
@@ -147,6 +153,39 @@ describe("proposal", () => {
       expect.objectContaining({ state: "proposal", role: "proposal-author", n: 1, outcome: "succeeded", failureReason: null, authMode: "subscription" }),
     ]);
     expect(forge.comments).toEqual([]);
+  });
+
+  it("Scenario: Capability without a delta spec fails the attempt", async () => {
+    const workItem = await workItemInProposal();
+    // The change holds a delta spec for vocab-import only; the first result also names trajectories.
+    const named: FakeStep = { ...VALID, result: { ...validResult(CHANGE_ID), capabilities: ["vocab-import", "trajectories"] } };
+    const { ctx, calls } = context([named, VALID]);
+    const branchHead = remoteHead(CHANGE_ID);
+
+    const transition = await proposal(ctx, workItem);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.evidence?.reason).toBe("invalid-result");
+    expect(calls[1]?.evidence?.evidence).toContain("trajectories");
+    expect(calls[1]?.evidence?.evidence).not.toContain("`vocab-import`");
+    expect(await listAttempts(db.pool, workItem.id)).toEqual([
+      expect.objectContaining({ n: 1, outcome: "failed", failureReason: "invalid-result" }),
+      expect.objectContaining({ n: 2, outcome: "succeeded" }),
+    ]);
+    // Only the second attempt's change was pushed.
+    expect(transition).toMatchObject({ kind: "advance", workItem: { state: "awaiting-proposal-approval" } });
+    expect(git(remote, "rev-list", "--count", `${branchHead}..refs/heads/${CHANGE_ID}`)).toBe("1");
+  });
+
+  it("fails an attempt whose result leaves out a capability the change has a delta spec for", async () => {
+    const workItem = await workItemInProposal();
+    const { ctx, calls } = context([{ ...VALID, result: { ...validResult(CHANGE_ID), capabilities: ["practice"] } }, VALID]);
+
+    await proposal(ctx, workItem);
+
+    expect(calls[1]?.evidence?.reason).toBe("invalid-result");
+    expect(calls[1]?.evidence?.evidence).toContain("`practice`");
+    expect(calls[1]?.evidence?.evidence).toContain("delta spec for `vocab-import`");
   });
 
   it("Scenario: Invalid proposal is retried with evidence", async () => {
@@ -198,7 +237,7 @@ describe("proposal", () => {
 
     const transition = await proposal(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("escalated");
     // The CLI turns an `escalate` into a non-zero exit (task 7.2).
     expect(transition).toEqual({ kind: "escalate", workItem: stored, reason: expect.stringContaining("invalid-change") as unknown });
@@ -231,7 +270,7 @@ describe("proposal", () => {
 
     const transition = await proposal(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("escalated");
     expect(transition).toEqual({ kind: "escalate", workItem: stored, reason: expect.stringContaining("auth-mode-mismatch") as unknown });
     expect(calls).toHaveLength(1);
@@ -248,7 +287,12 @@ describe("proposal", () => {
 
 describe("proposal-author budget", () => {
   it("Scenario: Three attempts stay within the work-item limit", async () => {
-    const role = await loadRole("proposal-author");
-    expect(role.maxBudgetUsd * MAX_PROPOSAL_ATTEMPTS).toBeLessThanOrEqual(5);
+    const names = await listTargets();
+    expect(names).toContain("vocab");
+    for (const name of names) {
+      const target = await loadTarget(name);
+      const role = await loadRole("proposal-author", target);
+      expect(role.maxBudgetUsd * MAX_PROPOSAL_ATTEMPTS, name).toBeLessThanOrEqual(target.budgetUsd);
+    }
   });
 });

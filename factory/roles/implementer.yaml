@@ -1,5 +1,5 @@
 # The implementer (brief, section 4): makes one task's tests pass without editing them. It writes
-# app source and the app and preview stack files (owner decision, brief section 8), never tests,
+# the target's source paths (its target.yaml), never tests,
 # contracts, tasks.md or any other file of the change. The green gate checks its outcome.
 name: implementer
 model: claude-sonnet-5-5
@@ -7,7 +7,7 @@ model: claude-sonnet-5-5
 # the diff check after the session (ADR 0011).
 runsIn: build
 tools: [Read, Grep, Glob, Edit, Write, Bash]
-# The app's typecheck and lint only: the whole repository's does not fit the build task.
+# The target's typecheck, lint and unit commands, from its target.yaml.
 # No install, no pnpm add, no network command and no git push. The runner denies git push and
 # network commands whatever this list says.
 allow:
@@ -16,18 +16,15 @@ allow:
   - Glob
   - Edit
   - Write
-  - Bash(pnpm typecheck:app)
-  - Bash(pnpm lint:app)
-  - Bash(pnpm exec vitest run:*)
+  - "Bash({target.typecheck})"
+  - "Bash({target.lint})"
+  - "Bash({target.unit}:*)"
   - Bash(git status:*)
   - Bash(git diff:*)
-# The contracts are the architect's; the ! exclusion keeps them out of app/*/src/**.
+# The target's implementer globs. They never match its contracts path, which is the architect's:
+# a target that lets them is refused when it is loaded.
 writable:
-  - app/*/src/**
-  - "!app/contracts/**"
-  - infra/app-stack.ts
-  - infra/preview-stack.ts
-  - infra/app/**
+  - "{target.writable}"
 skills: []
 maxTurns: 60
 maxBudgetUsd: 1.5

@@ -60,3 +60,17 @@ Roles with Bash run in a build container (ADR 0011). Role prompts move out of `.
 - **Role prompts** are copied with `factory/` as `factory/roles/<role>.md`. `.claude/agents` is no longer in the build context's allowlist or the image.
 - The last stage stays a bare `FROM worker`, so a build without a target is still the production worker.
 - The base image and platform are unchanged: the build container runs on the same `linux/amd64` Node image as the worker. Its size and the offline install time are measured in `add-build-roles` task 2.11.
+
+## Amendment 2026-11-15: a build base, and a build image per target
+
+The app's dependencies left the factory's lockfile with the split (ADR 0013), so the `build` target's warm store no longer holds what a build needs, and the build image held the factory's idea of one target's toolchain.
+
+- **`build-base`** replaces the `build` target: the worker with pnpm, the factory's dev dependencies, `FACTORY_CONTAINER=build` and the `factory-build` entry point. It holds no dependency store.
+- **A target's image** is `targets/<name>/build.Dockerfile`, which starts `FROM build-base AS target-build`, sets `FACTORY_TARGET` and adds only the target's toolchain. It may name no other image.
+- **The two are assembled into one Dockerfile** (`factory/worker/src/image.ts`, written to the git-ignored `.build/<name>.Dockerfile`), and one `docker build --target target-build` makes the image:
+  - A Dockerfile cannot include another.
+  - CDK builds its image assets in no order, and a named build context is a directory, a URL or an existing image, so the base could not be built first.
+  - `pnpm image:build --target <name>` does the same locally and tags `ceh-build-<name>:local`.
+- **Dependencies are installed online.** Before each session `factory-build` runs the target's install command in the clone, with no credential in its environment, and records the time in `outcome.json` (`installMs`). A warm store per target can come back if the exit run shows it is needed.
+- **The allowlist gains `targets/`**, so the worker and the build images hold the target configs. Under the allowlist's leading `*`, CDK's own include of the Dockerfile does not reach a file in a folder, so the stack lets the assembled file in by name; the image CDK builds therefore also holds `/app/.build/<name>.Dockerfile`.
+- "Worker image holds no secrets" covers the worker and every target's build image.

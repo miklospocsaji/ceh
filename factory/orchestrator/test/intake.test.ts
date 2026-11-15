@@ -2,11 +2,16 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FakeForge } from "@vocab/factory-forge/testing";
-import { findWorkItemByIssue, migrate } from "@vocab/factory-ledger";
-import { createTestDatabase, type TestDatabase } from "@vocab/factory-ledger/testing";
+import { FakeForge } from "@ceh/factory-forge/testing";
+import { findWorkItemByIssue, migrate } from "@ceh/factory-ledger";
+import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { intake } from "../src/intake.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
+
+const REPOSITORY = "miklospocsaji/vocab";
 
 const CHANGE_ID = "add-import-kindle-vocab-db";
 
@@ -65,9 +70,9 @@ describe("intake", () => {
     });
     const masterHead = git(remote, "rev-parse", "refs/heads/master");
 
-    const transition = await intake({ db: db.pool, forge }, { issueNumber: 12 });
+    const transition = await intake({ db: db.pool, forge, target: TARGET }, { issueNumber: 12 });
 
-    const workItem = await findWorkItemByIssue(db.pool, 12);
+    const workItem = await findWorkItemByIssue(db.pool, REPOSITORY, 12);
     expect(workItem).toMatchObject({ issueNumber: 12, changeId: CHANGE_ID, branch: CHANGE_ID, state: "proposal" });
     expect(await workItemCount(12)).toBe(1);
     expect(transition).toEqual({ kind: "advance", workItem });
@@ -77,15 +82,36 @@ describe("intake", () => {
     expect(forge.comments).toEqual([]);
   });
 
+  it("Scenario: Two repositories can hold the same issue number", async () => {
+    const issue = { number: 12, title: "Import Kindle vocab.db", body: "Import the lookups from the Kindle's vocab.db." };
+    // A second repository, with a remote of its own, whose issue 12 has the same title.
+    const otherRemote = join(root, "other.git");
+    git(root, "clone", "--bare", remote, otherRemote);
+    const other = testTarget({ name: "other", repository: "someone/other" });
+
+    const first = await intake({ db: db.pool, forge: new FakeForge({ remote, issues: [issue] }), target: TARGET }, { issueNumber: 12 });
+    const second = await intake({ db: db.pool, forge: new FakeForge({ remote: otherRemote, issues: [issue] }), target: other }, { issueNumber: 12 });
+
+    expect(first).toMatchObject({ kind: "advance", workItem: { repository: REPOSITORY, issueNumber: 12, changeId: CHANGE_ID } });
+    expect(second).toMatchObject({ kind: "advance", workItem: { repository: "someone/other", issueNumber: 12, changeId: CHANGE_ID, state: "proposal" } });
+    expect(await workItemCount(12)).toBe(2);
+    expect(git(otherRemote, "rev-parse", `refs/heads/${CHANGE_ID}`)).toMatch(/^[0-9a-f]{40}$/);
+
+    // Each repository still has one work item per issue: a repeated Intake changes nothing.
+    await intake({ db: db.pool, forge: new FakeForge({ remote: otherRemote, issues: [issue] }), target: other }, { issueNumber: 12 });
+    expect(await workItemCount(12)).toBe(2);
+    expect((await findWorkItemByIssue(db.pool, "someone/other", 12))?.id).not.toBe((await findWorkItemByIssue(db.pool, REPOSITORY, 12))?.id);
+  });
+
   it("Scenario: Issue without a requirement is rejected", async () => {
     const forge = new FakeForge({ remote, issues: [{ number: 13, title: "Import Kindle vocab.db", body: null }] });
     const masterHead = git(remote, "rev-parse", "refs/heads/master");
 
-    const transition = await intake({ db: db.pool, forge }, { issueNumber: 13 });
+    const transition = await intake({ db: db.pool, forge, target: TARGET }, { issueNumber: 13 });
 
     // The CLI turns a `reject` into a non-zero exit (task 7.2).
     expect(transition).toMatchObject({ kind: "reject", reason: expect.stringMatching(/requirement/i) as unknown });
-    expect(await findWorkItemByIssue(db.pool, 13)).toBeUndefined();
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, 13)).toBeUndefined();
     expect(await workItemCount(13)).toBe(0);
 
     expect(remoteBranches()).toEqual({ "refs/heads/master": masterHead });

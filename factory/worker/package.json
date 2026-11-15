@@ -1,10 +1,11 @@
 {
-  "name": "@vocab/factory-worker",
+  "name": "@ceh/factory-worker",
   "private": true,
   "type": "module",
   "exports": {
     "./config": "./src/config.ts",
-    "./store": "./src/store.ts"
+    "./store": "./src/store.ts",
+    "./image": "./src/image.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."
@@ -12,12 +13,13 @@
   "dependencies": {
     "@aws-sdk/client-s3": "3.1161.0",
     "@aws-sdk/client-sfn": "3.1161.0",
-    "@vocab/factory-artifacts": "workspace:*",
-    "@vocab/factory-forge": "workspace:*",
-    "@vocab/factory-gates": "workspace:*",
-    "@vocab/factory-ledger": "workspace:*",
-    "@vocab/factory-orchestrator": "workspace:*",
-    "@vocab/factory-roles": "workspace:*",
+    "@ceh/factory-artifacts": "workspace:*",
+    "@ceh/factory-forge": "workspace:*",
+    "@ceh/factory-gates": "workspace:*",
+    "@ceh/factory-ledger": "workspace:*",
+    "@ceh/factory-orchestrator": "workspace:*",
+    "@ceh/factory-roles": "workspace:*",
+    "@ceh/factory-target": "workspace:*",
     "pg": "8.23.1",
     "zod": "4.6.7"
   },

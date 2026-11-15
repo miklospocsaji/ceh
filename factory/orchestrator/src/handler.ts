@@ -3,8 +3,9 @@
  * Promise<Transition>` with no AWS-specific control flow (ADR 0002): the M1 CLI loop
  * sequences them locally, and in M2 they become Step Functions task handlers.
  */
-import type { Forge } from "@vocab/factory-forge";
-import type { Db, WorkItemRow } from "@vocab/factory-ledger";
+import type { Forge } from "@ceh/factory-forge";
+import type { Db, WorkItemRow } from "@ceh/factory-ledger";
+import type { Target } from "@ceh/factory-target";
 
 /**
  * The states a work item moves through. After `proposal-approved`, a `small` change goes to
@@ -34,7 +35,10 @@ export type Route = "design" | "plan" | "owner-review";
 
 export interface HandlerContext {
   db: Db;
+  /** The Forge on the target's repository. */
   forge: Forge;
+  /** The repository this run works on: work items are found by its repository (ADR 0014). */
+  target: Target;
 }
 
 /**

@@ -25,7 +25,7 @@ export async function scenarioTitles(changeDir: string): Promise<string[]> {
 export type TestNamesOptions = {
   /** A parsed Vitest report; when given, test names come from it instead of a text scan. */
   report?: readonly VitestFile[] | undefined;
-  /** Where the text scan looks, relative to the worktree; `app` unless given. */
+  /** Where the text scan looks, relative to the worktree: the target's coverage test directory. Needed when there is no report. */
   testsDir?: string | undefined;
 };
 
@@ -39,7 +39,8 @@ const QUOTED_SCENARIO = /(["'`])(Scenario: .+?)\1/g;
  */
 export async function testNames(worktree: string, options: TestNamesOptions = {}): Promise<string[]> {
   if (options.report) return options.report.flatMap((file) => file.tests.map((test) => test.name));
-  const dir = options.testsDir ?? "app";
+  if (options.testsDir === undefined) throw new Error("coverage needs a Vitest report or a tests directory");
+  const dir = options.testsDir.replace(/\/$/, "");
   const patterns = [`${dir}/**/test/**/*.test.ts`, `${dir}/e2e/**/*.ts`];
   const files = await collect(glob(patterns, { cwd: worktree, exclude: (name) => name === "node_modules" || name.endsWith("/node_modules") }));
   const names = new Set<string>();

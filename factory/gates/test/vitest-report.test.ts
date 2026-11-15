@@ -19,7 +19,7 @@ beforeAll(async () => {
   const outputFile = join(reportDir, "report.json");
   const env = { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", CI: "1" };
   // Vitest exits 1 because the fixture's tests fail; the report is still written.
-  await promisify(execFile)("pnpm", ["exec", "vitest", "run", "--project", "unit", "--reporter=json", `--outputFile=${outputFile}`, "app/"], { cwd: worktree, env })
+  await promisify(execFile)("pnpm", ["exec", "vitest", "run", "--reporter=json", `--outputFile=${outputFile}`, "app/"], { cwd: worktree, env })
     .catch(() => undefined);
   raw = JSON.parse(await readFile(outputFile, "utf8"));
 }, 60_000);

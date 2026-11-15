@@ -5,6 +5,8 @@ import { LedgerRecorder } from "../src/recorder.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 import { result } from "./messages.ts";
 
+const REPOSITORY = "miklospocsaji/vocab";
+
 const ROLE = "proposal-author";
 const TOKENS = { input: 100, output: 20, cacheRead: 0, cacheCreation: 0 };
 
@@ -19,7 +21,7 @@ beforeAll(async () => {
 
 async function newWorkItem(): Promise<string> {
   const issueNumber = nextIssue++;
-  const item = await createWorkItem(db.pool, { issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
+  const item = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
   return item.id;
 }
 

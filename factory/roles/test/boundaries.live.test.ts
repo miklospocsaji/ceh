@@ -25,6 +25,9 @@ import {
   type LiveAttempt,
   type ToolCall,
 } from "./live-harness.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 let worktree: string;
 const costs = createCostLog();
@@ -207,7 +210,7 @@ function expectNoEnvironmentLeak(attempt: LiveAttempt): void {
 describe("live read and fetch boundaries", () => {
   it("Scenario: WebFetch outside GitHub is denied", async () => {
     // The proposal author's own WebFetch rules, so the test checks what ships.
-    const author = await loadRole("proposal-author");
+    const author = await loadRole("proposal-author", TARGET);
     const fetchRules = author.allow.filter((rule) => rule === "WebFetch" || rule.startsWith("WebFetch("));
     expect(fetchRules.length, "the proposal author has no WebFetch rule").toBeGreaterThan(0);
     const role = await writeProbeRole(worktree, {

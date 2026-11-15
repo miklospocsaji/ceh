@@ -200,19 +200,22 @@ importers:
 
   factory/cli:
     dependencies:
-      '@vocab/factory-forge':
+      '@ceh/factory-forge':
         specifier: workspace:*
         version: link:../forge
-      '@vocab/factory-ledger':
+      '@ceh/factory-ledger':
         specifier: workspace:*
         version: link:../ledger
-      '@vocab/factory-orchestrator':
+      '@ceh/factory-orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
-      '@vocab/factory-roles':
+      '@ceh/factory-roles':
         specifier: workspace:*
         version: link:../roles
-      '@vocab/factory-worker':
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
+      '@ceh/factory-worker':
         specifier: workspace:*
         version: link:../worker
       pg:
@@ -231,9 +234,12 @@ importers:
 
   factory/gates:
     dependencies:
-      '@vocab/factory-artifacts':
+      '@ceh/factory-artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -243,7 +249,7 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.310
         version: 0.3.310(@anthropic-ai/sdk@1.3.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)
-      '@vocab/factory-roles':
+      '@ceh/factory-roles':
         specifier: workspace:*
         version: link:../roles
       pg:
@@ -253,6 +259,9 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
     devDependencies:
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
       '@types/pg':
         specifier: 8.23.1
         version: 8.23.1
@@ -268,18 +277,21 @@ importers:
       '@aws-sdk/client-ssm':
         specifier: 3.1161.0
         version: 3.1161.0
-      '@vocab/factory-artifacts':
+      '@ceh/factory-artifacts':
         specifier: workspace:*
         version: link:../artifacts
-      '@vocab/factory-forge':
+      '@ceh/factory-forge':
         specifier: workspace:*
         version: link:../forge
-      '@vocab/factory-ledger':
+      '@ceh/factory-ledger':
         specifier: workspace:*
         version: link:../ledger
-      '@vocab/factory-roles':
+      '@ceh/factory-roles':
         specifier: workspace:*
         version: link:../roles
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
     devDependencies:
       '@aws-sdk/client-cloudformation':
         specifier: 3.1161.0
@@ -296,15 +308,18 @@ importers:
       '@anthropic-ai/sdk':
         specifier: 1.3.0
         version: 1.3.0(zod@4.6.7)
+      '@ceh/factory-artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@ceh/factory-gates':
+        specifier: workspace:*
+        version: link:../gates
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
-      '@vocab/factory-artifacts':
-        specifier: workspace:*
-        version: link:../artifacts
-      '@vocab/factory-gates':
-        specifier: workspace:*
-        version: link:../gates
       minimatch:
         specifier: 10.2.6
         version: 10.2.6
@@ -328,6 +343,18 @@ importers:
         specifier: 3.1161.0
         version: 3.1161.0
 
+  factory/target:
+    dependencies:
+      minimatch:
+        specifier: 10.2.6
+        version: 10.2.6
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
   factory/worker:
     dependencies:
       '@aws-sdk/client-s3':
@@ -336,24 +363,27 @@ importers:
       '@aws-sdk/client-sfn':
         specifier: 3.1161.0
         version: 3.1161.0
-      '@vocab/factory-artifacts':
+      '@ceh/factory-artifacts':
         specifier: workspace:*
         version: link:../artifacts
-      '@vocab/factory-forge':
+      '@ceh/factory-forge':
         specifier: workspace:*
         version: link:../forge
-      '@vocab/factory-gates':
+      '@ceh/factory-gates':
         specifier: workspace:*
         version: link:../gates
-      '@vocab/factory-ledger':
+      '@ceh/factory-ledger':
         specifier: workspace:*
         version: link:../ledger
-      '@vocab/factory-orchestrator':
+      '@ceh/factory-orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
-      '@vocab/factory-roles':
+      '@ceh/factory-roles':
         specifier: workspace:*
         version: link:../roles
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../target
       pg:
         specifier: 8.23.1
         version: 8.23.1
@@ -379,9 +409,15 @@ importers:
 
   infra:
     dependencies:
-      '@vocab/factory-orchestrator':
+      '@ceh/factory-orchestrator':
         specifier: workspace:*
         version: link:../factory/orchestrator
+      '@ceh/factory-target':
+        specifier: workspace:*
+        version: link:../factory/target
+      '@ceh/factory-worker':
+        specifier: workspace:*
+        version: link:../factory/worker
       aws-cdk-lib:
         specifier: 2.275.0
         version: 2.275.0(constructs@10.8.1)
@@ -389,9 +425,6 @@ importers:
         specifier: 10.8.1
         version: 10.8.1
     devDependencies:
-      '@vocab/factory-worker':
-        specifier: workspace:*
-        version: link:../factory/worker
       aws-cdk:
         specifier: 2.1147.0
         version: 2.1147.0

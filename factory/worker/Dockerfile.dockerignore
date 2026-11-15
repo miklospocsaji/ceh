@@ -7,6 +7,8 @@
 !pnpm-workspace.yaml
 !tsconfig.base.json
 !factory/
+# The target configs: the worker and the build container load them (ADR 0014).
+!targets/
 !openspec/config.yaml
 # The test configs, for running the live boundary tests inside the image (task 1.16).
 !vitest.config.ts

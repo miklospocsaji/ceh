@@ -1,5 +1,5 @@
 {
-  "name": "@vocab/factory-artifacts",
+  "name": "@ceh/factory-artifacts",
   "private": true,
   "type": "module",
   "exports": {

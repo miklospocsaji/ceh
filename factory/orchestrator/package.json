@@ -1,5 +1,5 @@
 {
-  "name": "@vocab/factory-orchestrator",
+  "name": "@ceh/factory-orchestrator",
   "private": true,
   "type": "module",
   "exports": {
@@ -14,10 +14,11 @@
     "@aws-sdk/client-ecs": "3.1161.0",
     "@aws-sdk/client-sfn": "3.1161.0",
     "@aws-sdk/client-ssm": "3.1161.0",
-    "@vocab/factory-artifacts": "workspace:*",
-    "@vocab/factory-forge": "workspace:*",
-    "@vocab/factory-ledger": "workspace:*",
-    "@vocab/factory-roles": "workspace:*"
+    "@ceh/factory-artifacts": "workspace:*",
+    "@ceh/factory-forge": "workspace:*",
+    "@ceh/factory-ledger": "workspace:*",
+    "@ceh/factory-roles": "workspace:*",
+    "@ceh/factory-target": "workspace:*"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "3.1161.0",

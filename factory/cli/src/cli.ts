@@ -3,11 +3,14 @@
  * - `run --issue <n> --until proposal|design|plan|pr`
  * - `approve --issue <n>`: the owner's approval of a local run, which has no `/approve` comment
  * - `cost --issue <n>`
+ * Each takes `--target <name>`, a folder under `targets/`; without it, the only target. The
+ * target is settled before the ledger or GitHub is touched.
  * `main.ts` wires in the real ledger, GitHub and Agent SDK.
  */
 import { parseArgs } from "node:util";
-import { findWorkItemByIssue, listAttempts, listAttemptUsage, type AttemptRow, type AttemptUsage, type Db, type WorkItemRow } from "@vocab/factory-ledger";
-import { approveLocally, isRunUntil, RUN_UNTIL, runWorkItem, type RunContext } from "@vocab/factory-orchestrator";
+import { findWorkItemByIssue, listAttempts, listAttemptUsage, type AttemptRow, type AttemptUsage, type Db, type WorkItemRow } from "@ceh/factory-ledger";
+import { approveLocally, isRunUntil, RUN_UNTIL, runWorkItem, type RunContext } from "@ceh/factory-orchestrator";
+import type { Target } from "@ceh/factory-target";
 
 /** Exit codes of the CLI. */
 export const EXIT_CODES = {
@@ -26,15 +29,22 @@ export interface CliEnv {
   out: (text: string) => void;
   /** Receives everything the CLI prints to stderr. */
   err: (text: string) => void;
-  /** What `run` and `approve` need besides the ledger. Only they call it, so `cost` needs no GitHub token. */
-  runContext: () => Promise<Omit<RunContext, "db">>;
+  /** The names of the targets under `targets/`. */
+  listTargets: () => Promise<string[]>;
+  loadTarget: (name: string) => Promise<Target>;
+  /** Called once the command line and the target are valid, before the ledger is used: migrations. */
+  prepare?: () => Promise<void>;
+  /** What `run` and `approve` need besides the ledger and the target. Only they call it, so `cost` needs no GitHub token. */
+  runContext: (target: Target) => Promise<Omit<RunContext, "db" | "target">>;
 }
 
 export const USAGE = [
   "Usage:",
-  `  pnpm factory run --issue <n> --until <${RUN_UNTIL.join("|")}>`,
-  "  pnpm factory approve --issue <n>",
-  "  pnpm factory cost --issue <n>",
+  `  pnpm factory run --issue <n> --until <${RUN_UNTIL.join("|")}> [--target <name>]`,
+  "  pnpm factory approve --issue <n> [--target <name>]",
+  "  pnpm factory cost --issue <n> [--target <name>]",
+  "",
+  "--target names a folder under targets/; it may be left out when there is only one.",
   "",
 ].join("\n");
 
@@ -43,24 +53,40 @@ class UsageError extends Error {}
 /** Runs one CLI command and resolves with its exit code. Unexpected errors reject. */
 export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   let command: Command;
+  let target: Target;
   try {
     command = parseCommand(argv);
+    target = await chooseTarget(command.target, env);
   } catch (error) {
     if (!(error instanceof UsageError) && !isParseArgsError(error)) throw error;
     env.err(`factory: ${error.message}\n\n${USAGE}`);
     return EXIT_CODES.usage;
   }
+  await env.prepare?.();
   switch (command.name) {
     case "run":
-      return run(command, env);
+      return run(command, target, env);
     case "approve":
-      return approve(command, env);
+      return approve(command, target, env);
     case "cost":
-      return cost(command, env);
+      return cost(command, target, env);
   }
 }
 
-type Command = { name: "run"; issueNumber: number; until: (typeof RUN_UNTIL)[number] } | { name: "approve"; issueNumber: number } | { name: "cost"; issueNumber: number };
+/** The named target, or the only one; anything else is a usage error that lists the known targets. */
+async function chooseTarget(name: string | undefined, env: CliEnv): Promise<Target> {
+  const known = await env.listTargets();
+  const list = known.length === 0 ? "there are none under targets/" : `known targets: ${known.join(", ")}`;
+  if (name !== undefined) {
+    if (!known.includes(name)) throw new UsageError(`unknown target ${name} (${list})`);
+    return env.loadTarget(name);
+  }
+  const [only, ...rest] = known;
+  if (only === undefined || rest.length > 0) throw new UsageError(`--target is needed (${list})`);
+  return env.loadTarget(only);
+}
+
+type Command = ({ name: "run"; issueNumber: number; until: (typeof RUN_UNTIL)[number] } | { name: "approve"; issueNumber: number } | { name: "cost"; issueNumber: number }) & { target: string | undefined };
 
 const COMMANDS = ["run", "approve", "cost"] as const;
 
@@ -73,7 +99,7 @@ function parseCommand(argv: string[]): Command {
     args: argv,
     allowPositionals: true,
     strict: true,
-    options: { issue: { type: "string" }, until: { type: "string" } },
+    options: { issue: { type: "string" }, until: { type: "string" }, target: { type: "string" } },
   });
   const [name, ...rest] = positionals;
   if (rest.length > 0) throw new UsageError(`unexpected argument ${rest[0] ?? ""}`);
@@ -86,12 +112,12 @@ function parseCommand(argv: string[]): Command {
 
   if (name !== "run") {
     if (values.until !== undefined) throw new UsageError(`${name} takes no --until`);
-    return { name, issueNumber };
+    return { name, issueNumber, target: values.target };
   }
   if (values.until === undefined || !isRunUntil(values.until)) {
     throw new UsageError(`--until must be one of: ${RUN_UNTIL.join(", ")}`);
   }
-  return { name, issueNumber, until: values.until };
+  return { name, issueNumber, until: values.until, target: values.target };
 }
 
 /** parseArgs rejects unknown options and missing values with a TypeError coded `ERR_PARSE_ARGS_*`. */
@@ -101,8 +127,8 @@ function isParseArgsError(error: unknown): error is Error {
   return typeof code === "string" && code.startsWith("ERR_PARSE_ARGS_");
 }
 
-async function run(command: Extract<Command, { name: "run" }>, env: CliEnv): Promise<number> {
-  const ctx = { ...(await env.runContext()), db: env.db };
+async function run(command: Extract<Command, { name: "run" }>, target: Target, env: CliEnv): Promise<number> {
+  const ctx = { ...(await env.runContext(target)), db: env.db, target };
   const outcome = await runWorkItem(ctx, { issueNumber: command.issueNumber, until: command.until });
   switch (outcome.kind) {
     case "stopped": {
@@ -131,8 +157,8 @@ async function run(command: Extract<Command, { name: "run" }>, env: CliEnv): Pro
   }
 }
 
-async function approve(command: Extract<Command, { name: "approve" }>, env: CliEnv): Promise<number> {
-  const ctx = { ...(await env.runContext()), db: env.db };
+async function approve(command: Extract<Command, { name: "approve" }>, target: Target, env: CliEnv): Promise<number> {
+  const ctx = { ...(await env.runContext(target)), db: env.db, target };
   const outcome = await approveLocally(ctx, command.issueNumber);
   switch (outcome.kind) {
     case "approved":
@@ -151,8 +177,8 @@ async function approve(command: Extract<Command, { name: "approve" }>, env: CliE
   }
 }
 
-async function cost(command: Extract<Command, { name: "cost" }>, env: CliEnv): Promise<number> {
-  const workItem = await findWorkItemByIssue(env.db, command.issueNumber);
+async function cost(command: Extract<Command, { name: "cost" }>, target: Target, env: CliEnv): Promise<number> {
+  const workItem = await findWorkItemByIssue(env.db, target.repository, command.issueNumber);
   if (workItem === undefined) {
     env.err(`factory: issue #${String(command.issueNumber)} has no work item\n`);
     return EXIT_CODES.failed;

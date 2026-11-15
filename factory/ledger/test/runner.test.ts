@@ -1,13 +1,18 @@
 // The role runner and the real ledger together, with a fake `query`: what a session emits is what the ledger stores.
 import { tmpdir } from "node:os";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AttemptFailed, createRunner, loadRole, type QueryFn, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { AttemptFailed, createRunner, loadRole, type QueryFn, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { migrate } from "../src/migrate.ts";
 import { closeAttempt, createWorkItem, listAttempts, openAttempt } from "../src/queries.ts";
 import { LedgerRecorder } from "../src/recorder.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 import { assistant, init, result } from "./messages.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 const ROLE = "proposal-author";
 const TOKENS = { input: 100, output: 20, cacheRead: 0, cacheCreation: 0 };
@@ -36,7 +41,7 @@ function saying(text: string): SDKMessage {
  */
 async function attempt(env: Record<string, string>, authMode: "api-key" | "subscription", steps: (sessionEnv: Record<string, string | undefined>) => SDKMessage[]) {
   const issueNumber = nextIssue++;
-  const row = await createWorkItem(db.pool, { issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
+  const row = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
   const opened = await openAttempt(db.pool, { workItemId: row.id, state: "proposal", role: ROLE });
 
   const query: QueryFn = ({ options }) =>
@@ -49,7 +54,7 @@ async function attempt(env: Record<string, string>, authMode: "api-key" | "subsc
   const runRole: RunRole = createRunner({ query, recorder: new LedgerRecorder(db.pool), env });
   const item: WorkItem = { id: row.id, changeId: row.changeId, worktree: tmpdir(), issue: { title: "Add a sample", body: "Please add a sample." }, changeFiles: [], specs: [] };
 
-  const error: unknown = await runRole({ ...(await loadRole(ROLE)), authMode }, item).then(
+  const error: unknown = await runRole({ ...(await loadRole(ROLE, TARGET)), authMode }, item).then(
     () => undefined,
     (reason: unknown) => reason,
   );

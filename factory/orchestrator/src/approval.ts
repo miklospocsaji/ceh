@@ -11,7 +11,7 @@
  * Like the other handlers, these are plain async functions with no AWS-specific control flow:
  * Step Functions is behind `TaskTokens`.
  */
-import { DesignResult, ProposalResult } from "@vocab/factory-artifacts";
+import { DesignResult, ProposalResult } from "@ceh/factory-artifacts";
 import {
   closeApproval,
   findWorkItemByIssue,
@@ -23,7 +23,7 @@ import {
   type ApprovalKind,
   type AuthMode,
   type WorkItemRow,
-} from "@vocab/factory-ledger";
+} from "@ceh/factory-ledger";
 import { readComplexity } from "./change-files.ts";
 import { escalateWith } from "./escalation.ts";
 import type { EscalationReason } from "./exit-codes.ts";
@@ -113,7 +113,7 @@ const APPROVAL_OUTPUT = "{}";
 
 /** The owner's `/approve`: `by` is the login the webhook verified as the owner's. */
 export async function approve(ctx: ApproveContext, issueNumber: number, by: string): Promise<ApproveOutcome> {
-  const workItem = await findWorkItemByIssue(ctx.db, issueNumber);
+  const workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, issueNumber);
   // A work item no longer awaiting (escalated, say) may still hold an approval whose token is dead.
   const awaiting = workItem?.state === AWAITING || workItem?.state === AWAITING_DESIGN;
   const approval = awaiting ? await closeApproval(ctx.db, workItem.id, by) : undefined;
@@ -202,7 +202,7 @@ const ESCALATION_SUMMARY: Record<EscalationReason, string> = {
  * already is left as it is, with no second comment.
  */
 export async function escalateWorkItem(ctx: HandlerContext, issueNumber: number, reason: EscalationReason): Promise<WorkItemRow | undefined> {
-  const workItem = await findWorkItemByIssue(ctx.db, issueNumber);
+  const workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, issueNumber);
   if (workItem?.state === ESCALATED) return workItem;
   const subject = workItem === undefined ? "this issue" : `\`${workItem.changeId}\``;
   await ctx.forge.comment(

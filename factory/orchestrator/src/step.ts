@@ -21,7 +21,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
-import { BuildOutcome, ClassificationResult, GatesResult } from "@vocab/factory-artifacts";
+import { BuildOutcome, ClassificationResult, GatesResult } from "@ceh/factory-artifacts";
 import {
   closeAttempt,
   incrementDesignFlaws,
@@ -37,8 +37,8 @@ import {
   type FailureReason,
   type TaskRow,
   type WorkItemRow,
-} from "@vocab/factory-ledger";
-import { AttemptFailed, isWritable, renderClassifierPrompt, replayMessages, writableFor, type RetryEvidence, type Role, type RunRole } from "@vocab/factory-roles";
+} from "@ceh/factory-ledger";
+import { AttemptFailed, isWritable, renderClassifierPrompt, replayMessages, writableFor, type RetryEvidence, type Role, type RunRole } from "@ceh/factory-roles";
 import { NotApplicable } from "./approval.ts";
 import { nextBuildKey, taskPrefix, type ArtifactStore, type NextBuild } from "./build-io.ts";
 import { classificationOf, failedChecks } from "./design-flaw.ts";
@@ -366,6 +366,7 @@ async function writeBuild(ctx: StepContext, item: WorkItemRow, task: TaskRow, wo
     : undefined;
 
   const input = {
+    target: ctx.target.name,
     changeId: item.changeId,
     branch: item.branch,
     baseCommit: request.base ?? (await git(worktree, "rev-parse", "HEAD")),

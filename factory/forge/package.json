@@ -1,5 +1,5 @@
 {
-  "name": "@vocab/factory-forge",
+  "name": "@ceh/factory-forge",
   "private": true,
   "type": "module",
   "exports": {

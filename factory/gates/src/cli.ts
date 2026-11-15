@@ -1,14 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { GatesResult } from "@vocab/factory-artifacts";
+import { GatesResult } from "@ceh/factory-artifacts";
+import { loadTarget, TargetConfigError } from "@ceh/factory-target";
 import { z } from "zod";
 import { checkCoverage } from "./coverage.ts";
-import { runGates } from "./run.ts";
+import { runGates, targetGates } from "./run.ts";
 
 const USAGE = `Usage:
-  pnpm gates red|green --change <id> --task <id> --scenarios <file.json> [--worktree <dir>]
-  pnpm gates coverage --change <id> [--tests <dir>] [--worktree <dir>]
+  pnpm gates red|green --target <name> --change <id> --task <id> --scenarios <file.json> [--worktree <dir>]
+  pnpm gates coverage --change <id> (--tests <dir> | --target <name>) [--worktree <dir>]
+
+--target names a folder under targets/: the gates run its commands. --tests is for ceh's own changes.
 
 <file.json> holds { "scenarios": [titles], "coveredSoFar": [titles] }; coveredSoFar is for green.
 Prints gates.json to stdout. Exits 0 when the gates pass, 1 when they fail, 2 on bad input.
@@ -35,6 +38,7 @@ async function main(argv: string[]): Promise<number> {
       task: { type: "string" },
       scenarios: { type: "string" },
       tests: { type: "string" },
+      target: { type: "string" },
       worktree: { type: "string" },
     },
   });
@@ -50,11 +54,13 @@ async function main(argv: string[]): Promise<number> {
     const file = required(values.scenarios, "--scenarios");
     const parsed = ScenariosFile.safeParse(JSON.parse(await readFile(file, "utf8")));
     if (!parsed.success) throw new UsageError(`${file}: ${parsed.error.message}`);
-    result = await runGates({ worktree, changeId, mode: command, task: { id: taskId, ...parsed.data } });
+    const target = await loadTarget(required(values.target, "--target"));
+    result = await runGates({ worktree, changeId, mode: command, task: { id: taskId, ...parsed.data }, ...targetGates(target) });
   } else if (command === "coverage") {
-    // Scenario coverage of the whole change, outside any task; --tests replaces app/ (for the factory's own changes).
+    // Scenario coverage of the whole change, outside any task: under --tests (ceh's own changes) or the target's coverage test directory.
+    const testsDir = values.tests ?? (await loadTarget(required(values.target, "--tests or --target"))).coverageTestsDir;
     const started = performance.now();
-    const coverage = await checkCoverage({ worktree, changeId, testsDir: values.tests });
+    const coverage = await checkCoverage({ worktree, changeId, testsDir });
     const output = coverage.passed ? "Every scenario has a test.\n" : coverage.missing.map((title) => `No test names the scenario: ${title}\n`).join("");
     result = GatesResult.parse({
       mode: "green",
@@ -75,7 +81,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (error: unknown) => {
-    const usage = error instanceof UsageError || error instanceof TypeError || error instanceof SyntaxError || (error as { code?: string }).code === "ENOENT";
+    const usage = error instanceof UsageError || error instanceof TargetConfigError || error instanceof TypeError || error instanceof SyntaxError || (error as { code?: string }).code === "ENOENT";
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n${usage ? USAGE : ""}`);
     process.exitCode = usage ? 2 : 1;
   },

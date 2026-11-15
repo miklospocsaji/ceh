@@ -12,9 +12,9 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ProposalResult } from "@vocab/factory-artifacts";
-import { closeApproval, findOpenApproval, findWorkItemByIssue, listTasks, setWorkItemState, type WorkItemRow } from "@vocab/factory-ledger";
-import type { PlanPaths, Role } from "@vocab/factory-roles";
+import { ProposalResult } from "@ceh/factory-artifacts";
+import { closeApproval, findOpenApproval, findWorkItemByIssue, listTasks, setWorkItemState, type WorkItemRow } from "@ceh/factory-ledger";
+import type { PlanPaths, Role } from "@ceh/factory-roles";
 import { approved } from "./approval.ts";
 import type { ArtifactStore, RunBuild } from "./build-io.ts";
 import { design } from "./design.ts";
@@ -67,7 +67,7 @@ export type LocalApproveOutcome =
  * goes to Plan with a comment. An approval row, if one is open, is closed.
  */
 export async function approveLocally(ctx: Omit<RunContext, "runBuild" | "store">, issueNumber: number): Promise<LocalApproveOutcome> {
-  const workItem = await findWorkItemByIssue(ctx.db, issueNumber);
+  const workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, issueNumber);
   if (workItem?.state === "awaiting-proposal-approval") {
     if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, "local");
     const transition = await approved({ ...ctx, readChangeFile: readChangeFile(ctx) }, workItem);
@@ -117,7 +117,7 @@ interface Next {
 export async function runWorkItem(ctx: RunContext, request: RunRequest): Promise<RunOutcome> {
   const limit = RUN_UNTIL.indexOf(request.until);
   let advanced = false;
-  let workItem = await findWorkItemByIssue(ctx.db, request.issueNumber);
+  let workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, request.issueNumber);
 
   for (;;) {
     if (workItem !== undefined) {

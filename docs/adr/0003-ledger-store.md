@@ -50,3 +50,11 @@ The amendment of 2026-11-06 planned S3 for every result from M3. M3 (add-build-l
   - Locally, the same keys live under `~/.factory/store` (`FsStore`).
   - Both containers pick the store from `FACTORY_STORE_DIR` or `FACTORY_STORE_BUCKET`.
 - Screenshots (M4) will follow the same pattern: objects in the bucket, keys in the ledger.
+
+## Amendment 2026-11-15: work items keyed by repository
+
+The factory works on repositories it does not live in (ADR 0013, ADR 0014), so an issue number or a change id alone no longer names a work item.
+
+- Migration `0004_repository.sql` adds `work_items.repository` (`<owner>/<repo>`), backfills `miklospocsaji/vocab`, and replaces the unique issue number and the unique change id with `(repository, issue_number)` and `(repository, change_id)`.
+- Every query that finds a work item takes the repository; handlers pass their target's.
+- The artifact store's keys (`work-items/<change-id>/…`) and the execution names stay as they are. They hold one target today; a second target needs the repository in them too.

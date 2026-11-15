@@ -8,18 +8,20 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { App } from "aws-cdk-lib";
+import { App, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { WEBHOOK_ENV } from "@vocab/factory-orchestrator/webhook-env";
-import { workerConfig } from "@vocab/factory-worker/config";
+import { WEBHOOK_ENV } from "@ceh/factory-orchestrator/webhook-env";
+import { testTarget } from "@ceh/factory-target/testing";
+import { workerConfig } from "@ceh/factory-worker/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BOUNDARY_CHECK_TARGET, FactoryStack, PARAMETERS, STATE_MACHINE_NAME, WORKER_CONTAINER } from "../factory-stack.ts";
+import { BOUNDARY_CHECK_TARGET, FactoryStack, factoryContext, PARAMETERS, STATE_MACHINE_NAME, WORKER_CONTAINER } from "../factory-stack.ts";
 
 const ACCOUNT = "123456789012";
 const REGION = "eu-central-1";
 const BUDGET_EMAIL = "budget@example.com";
 const REPO_ROOT = join(import.meta.dirname, "../..");
-const GITHUB = { repository: "miklospocsaji/vocab", appId: 5586098, installationId: 177972181, slug: "vocab-factory", owner: "miklospocsaji" };
+const GITHUB = { appId: 5586098, installationId: 177972181, slug: "ceh-app" };
+const TARGET = testTarget();
 
 type Resource = { Type: string; Properties?: Record<string, unknown> };
 
@@ -31,7 +33,7 @@ let resources: Record<string, Resource>;
 beforeAll(() => {
   outdir = mkdtempSync(join(tmpdir(), "factory-stack-"));
   const app = new App({ outdir, context: { "aws:cdk:bundling-stacks": [] } });
-  stack = new FactoryStack(app, "Factory", { env: { account: ACCOUNT, region: REGION }, github: GITHUB, budgetEmail: BUDGET_EMAIL });
+  stack = new FactoryStack(app, "Factory", { env: { account: ACCOUNT, region: REGION }, target: TARGET, github: GITHUB, budgetEmail: BUDGET_EMAIL });
   template = Template.fromStack(stack);
   resources = (template.toJSON() as { Resources?: Record<string, Resource> }).Resources ?? {};
 });
@@ -108,6 +110,68 @@ function policiesOf(roleId: string): { Statement: Record<string, unknown>[] }[] 
     .map((policy) => policy["PolicyDocument"] as { Statement: Record<string, unknown>[] });
   return [...inline, ...attached];
 }
+
+describe("factory stack: target", () => {
+  /** The environment of a task definition's one container, by variable name. */
+  const environmentOf = (output: string): Record<string, unknown> => {
+    const variables = (onlyContainer(taskDefinitionOf(output))["Environment"] as { Name: string; Value: unknown }[] | undefined) ?? [];
+    return Object.fromEntries(variables.map((variable) => [variable.Name, variable.Value]));
+  };
+
+  it("Scenario: Stack settings come from the target config", () => {
+    // The webhook accepts the target's repository and the target's owner.
+    const variables = (props("AWS::Lambda::Function").find((fn) => JSON.stringify(fn).includes(WEBHOOK_ENV.stateMachineArn))?.["Environment"] as { Variables: Record<string, unknown> }).Variables;
+    expect(variables[WEBHOOK_ENV.repository]).toBe("miklospocsaji/vocab");
+    expect(variables[WEBHOOK_ENV.owner]).toBe("miklospocsaji");
+
+    // Every task knows its target; the worker no longer takes the repository from its environment.
+    for (const output of ["WorkerTaskDefinitionArn", "BoundaryCheckTaskDefinitionArn", "BuildTaskDefinitionArn", "BuildBoundaryCheckTaskDefinitionArn"]) {
+      expect(environmentOf(output)["FACTORY_TARGET"], output).toBe("vocab");
+      expect(environmentOf(output), output).not.toHaveProperty("FACTORY_GITHUB_REPOSITORY");
+    }
+
+    // The build task runs the target's image: the worker Dockerfile with vocab's assembled after it.
+    const buildImage = dockerAssets()[imageHash(onlyContainer(taskDefinitionOf("BuildTaskDefinitionArn")))]?.source;
+    expect(buildImage).toMatchObject({ dockerFile: ".build/vocab.Dockerfile", dockerBuildTarget: "target-build" });
+    const assembled = readFileSync(join(outdir, String(buildImage?.["directory"]), ".build/vocab.Dockerfile"), "utf8");
+    expect(assembled).toContain(readFileSync(join(REPO_ROOT, "targets/vocab/build.Dockerfile"), "utf8").trimEnd());
+    expect(assembled.startsWith(readFileSync(join(REPO_ROOT, "factory/worker/Dockerfile"), "utf8").trimEnd())).toBe(true);
+    // The staged context holds the target's config, for the build to load.
+    expect(existsSync(join(outdir, String(buildImage?.["directory"]), "targets/vocab/target.yaml"))).toBe(true);
+  });
+
+  it("follows another target", () => {
+    const other = testTarget({ repository: "someone/other-repo", owner: "someone" });
+    const app = new App({ outdir: mkdtempSync(join(tmpdir(), "factory-stack-other-")), context: { "aws:cdk:bundling-stacks": [] } });
+    const otherStack = new FactoryStack(app, "Factory", { env: { account: ACCOUNT, region: REGION }, target: other, github: GITHUB, budgetEmail: BUDGET_EMAIL });
+    const text = JSON.stringify(Template.fromStack(otherStack).toJSON());
+    expect(text).toContain("someone/other-repo");
+    expect(text).not.toContain("miklospocsaji/vocab");
+    rmSync(app.outdir, { recursive: true, force: true });
+  });
+
+  it("Scenario: Stack is tagged for ceh", () => {
+    expect(stack.stackName).toBe("Factory");
+    const tagged = Object.entries(resources).filter(([, resource]) => Array.isArray(resource.Properties?.["Tags"]));
+    // The stateful and the costly ones among them: the ledger, the bucket, the cluster, the VPC.
+    for (const type of ["AWS::RDS::DBCluster", "AWS::S3::Bucket", "AWS::ECS::Cluster", "AWS::EC2::VPC", "AWS::ECS::TaskDefinition", "AWS::Lambda::Function"]) {
+      expect(tagged.some(([, resource]) => resource.Type === type), type).toBe(true);
+    }
+    for (const [id, resource] of tagged) {
+      const tags = resource.Properties?.["Tags"] as { Key: string; Value: unknown }[];
+      expect(tags.find((tag) => tag.Key === "project")?.Value, id).toBe("ceh");
+    }
+    expect(JSON.stringify(resources)).not.toContain("vocab-factory");
+  });
+
+  it("takes the App from cdk.json's context, and neither the repository nor the owner", () => {
+    const context = (JSON.parse(readFileSync(join(REPO_ROOT, "infra/cdk.json"), "utf8")) as { context: Record<string, unknown> }).context;
+    expect(context).not.toHaveProperty("factory:githubRepository");
+    expect(context).not.toHaveProperty("factory:owner");
+    const app = new App({ context: { ...context, budgetEmail: BUDGET_EMAIL } });
+    expect(factoryContext(new Stack(app, "Context"))).toEqual({ github: { appId: 5586098, installationId: 177972181, slug: "ceh-app" }, budgetEmail: BUDGET_EMAIL });
+  });
+});
 
 describe("factory stack: network and ledger", () => {
   it("Scenario: Ledger is closed to everything but the worker", () => {
@@ -188,7 +252,7 @@ describe("factory stack: worker", () => {
     // Configuration only: nothing secret, and nothing that names a secret's value.
     expect(Object.fromEntries(environment.map((variable) => [variable.Name, variable.Value]))).toEqual({
       FACTORY_AUTH_MODE: "api-key",
-      FACTORY_GITHUB_REPOSITORY: GITHUB.repository,
+      FACTORY_TARGET: "vocab",
       FACTORY_GITHUB_APP_ID: String(GITHUB.appId),
       FACTORY_GITHUB_APP_INSTALLATION_ID: String(GITHUB.installationId),
       FACTORY_GITHUB_APP_SLUG: GITHUB.slug,
@@ -202,7 +266,7 @@ describe("factory stack: worker", () => {
     expect(worker).not.toContain(PARAMETERS.githubWebhookSecret.slice(1));
   });
 
-  it("gives the worker every variable its configuration needs", () => {
+  it("gives the worker every variable its configuration needs", async () => {
     // Stand-ins for what ECS injects from `secrets` at start; the names come from the template.
     const injected: Record<string, string> = {
       ANTHROPIC_API_KEY: "sk-ant-api-stand-in",
@@ -220,7 +284,8 @@ describe("factory stack: worker", () => {
     }
 
     // The worker's own parser, so a variable the stack fails to pass fails here, not in Fargate.
-    const config = workerConfig(env);
+    const config = await workerConfig(env);
+    expect(config).toMatchObject({ owner: "miklospocsaji", repo: "vocab", target: { name: "vocab" } });
 
     expect(config.ledger.ssl).toMatchObject({ rejectUnauthorized: true });
     expect(config.ledger).not.toHaveProperty("connectionString");
@@ -497,8 +562,8 @@ describe("factory stack: webhook Lambda", () => {
     expect(Object.keys(variables).filter((name) => name !== "NODE_OPTIONS" && name !== "AWS_NODEJS_CONNECTION_REUSE_ENABLED").sort()).toEqual(
       Object.values(WEBHOOK_ENV).sort(),
     );
-    expect(variables[WEBHOOK_ENV.owner]).toBe(GITHUB.owner);
-    expect(variables[WEBHOOK_ENV.repository]).toBe(GITHUB.repository);
+    expect(variables[WEBHOOK_ENV.owner]).toBe(TARGET.owner);
+    expect(variables[WEBHOOK_ENV.repository]).toBe(TARGET.repository);
     expect(variables[WEBHOOK_ENV.secretParameter]).toBe(PARAMETERS.githubWebhookSecret);
     expect(variables[WEBHOOK_ENV.container]).toBe(WORKER_CONTAINER);
     expect(target(variables[WEBHOOK_ENV.stateMachineArn])).toBe(only("AWS::StepFunctions::StateMachine")[0]);
@@ -652,6 +717,8 @@ describe("factory stack: build task", () => {
     expect(Object.fromEntries(environment.map((variable) => [variable.Name, variable.Value]))).toEqual({
       FACTORY_AUTH_MODE: "api-key",
       FACTORY_STORE_BUCKET: { Ref: artifactBucket() },
+      // A name, no credential: the target whose config the image holds.
+      FACTORY_TARGET: "vocab",
       NODE_OPTIONS: "--max-old-space-size=4096",
     });
 
@@ -686,7 +753,7 @@ describe("factory stack: build task", () => {
     expect(resources[build]?.Properties?.["SecurityGroupEgress"]).toEqual([expect.objectContaining({ CidrIp: "0.0.0.0/0", IpProtocol: "-1" })]);
   });
 
-  it("runs the Dockerfile's build target on Fargate, 2 vCPU, 8 GB and 30 GB of storage, linux/amd64, logging for 14 days", () => {
+  it("runs the target's build image on Fargate, 2 vCPU, 8 GB and 30 GB of storage, linux/amd64, logging for 14 days", () => {
     const taskDefinition = taskDefinitionOf("BuildTaskDefinitionArn");
     expect(taskDefinition).toMatchObject({
       RequiresCompatibilities: ["FARGATE"],
@@ -702,8 +769,9 @@ describe("factory stack: build task", () => {
     const assets = dockerAssets();
     const worker = assets[imageHash(onlyContainer(taskDefinitionOf("WorkerTaskDefinitionArn")))]?.source;
     const buildImage = assets[imageHash(container)]?.source;
-    expect(omit(buildImage ?? {}, "directory")).toEqual({ ...omit(worker ?? {}, "directory"), dockerBuildTarget: "build" });
-    expect(contextDigest(String(buildImage?.["directory"]))).toEqual(contextDigest(String(worker?.["directory"])));
+    // The assembled Dockerfile's target stage, from the worker's context plus that one file.
+    expect(omit(buildImage ?? {}, "directory")).toEqual({ ...omit(worker ?? {}, "directory"), dockerFile: ".build/vocab.Dockerfile", dockerBuildTarget: "target-build" });
+    expect(omit(contextDigest(String(buildImage?.["directory"])), ".build/vocab.Dockerfile")).toEqual(contextDigest(String(worker?.["directory"])));
   });
 
   it("Scenario: Build task has room for its checks and writes no core dumps", () => {

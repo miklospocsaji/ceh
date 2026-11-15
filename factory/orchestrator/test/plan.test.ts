@@ -1,6 +1,6 @@
 // Plan (add-build-loop task 3.5): the planner, validatePlan, the tasks in the ledger, tasks.md on the branch.
-import { closeApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, listTasks, type WorkItemRow } from "@vocab/factory-ledger";
-import { loadRole, type PlanPaths, type Role } from "@vocab/factory-roles";
+import { closeApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, listTasks, type WorkItemRow } from "@ceh/factory-ledger";
+import { loadRole, type PlanPaths, type Role } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { approved, awaitApproval } from "../src/approval.ts";
 import { design } from "../src/design.ts";
@@ -8,6 +8,11 @@ import { changeFileReader } from "../src/git.ts";
 import { MAX_PLAN_ATTEMPTS, plan, type PlanContext } from "../src/plan.ts";
 import { createFakeRoleRunner, type FakeStep } from "./fake-role-runner.ts";
 import { BOT, CHANGE, changedFiles, git, identityOf, ISSUE, proposedWorkItem, remoteHead, useWorkItemFixture } from "./work-item-fixture.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 const f = useWorkItemFixture("plan");
 
@@ -43,17 +48,17 @@ let planner: Role;
 let planPaths: PlanPaths;
 
 beforeAll(async () => {
-  planner = await loadRole("planner");
-  planPaths = { implementer: (await loadRole("implementer")).writable, testAuthor: (await loadRole("test-author")).writable };
+  planner = await loadRole("planner", TARGET);
+  planPaths = { implementer: (await loadRole("implementer", TARGET)).writable, testAuthor: (await loadRole("test-author", TARGET)).writable };
 });
 
 function planContext(steps: FakeStep[]): { ctx: PlanContext; calls: ReturnType<typeof createFakeRoleRunner>["calls"] } {
   const fake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), steps);
-  return { ctx: { db: f.db.pool, forge: f.forge, runRole: fake.runRole, planner, planPaths, repo: f.repo, home: f.home, committer: BOT }, calls: fake.calls };
+  return { ctx: { db: f.db.pool, forge: f.forge, target: TARGET, runRole: fake.runRole, planner, planPaths, repo: f.repo, home: f.home, committer: BOT }, calls: fake.calls };
 }
 
 async function approvedWorkItem(complexity: string): Promise<WorkItemRow> {
-  const transition = await approved({ db: f.db.pool, forge: f.forge, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) }, await proposedWorkItem(f, complexity));
+  const transition = await approved({ db: f.db.pool, forge: f.forge, target: TARGET, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) }, await proposedWorkItem(f, complexity));
   if (transition.kind !== "advance") throw new Error(`approved did not advance: ${JSON.stringify(transition)}`);
   return transition.workItem;
 }
@@ -67,7 +72,7 @@ describe("plan", { timeout: 30_000 }, () => {
     const transition = await plan(ctx, workItem);
 
     // The execution's next state gets the task ids, in order.
-    const stored = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("build");
     expect(transition).toEqual({ kind: "advance", workItem: stored, result: PLAN, tasks: ["1.1", "1.2"] });
     expect(calls.map((call) => call.role)).toEqual(["planner"]);
@@ -126,7 +131,7 @@ describe("plan", { timeout: 30_000 }, () => {
 
     const transition = await plan(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("escalated");
     expect(transition).toEqual({ kind: "escalate", workItem: stored, reason: expect.stringContaining("plan") as unknown });
     expect(MAX_PLAN_ATTEMPTS).toBe(3);
@@ -139,20 +144,20 @@ describe("plan", { timeout: 30_000 }, () => {
 
   it("plans a large change once the owner has approved its design", async () => {
     const workItem = await approvedWorkItem("large");
-    const architect = await loadRole("architect");
-    const designReviewer = await loadRole("design-reviewer");
+    const architect = await loadRole("architect", TARGET);
+    const designReviewer = await loadRole("design-reviewer", TARGET);
     const designFake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), [
       { files: { "design.md": "# Design\n\n## Overview\n\nRead vocab.db.\n" }, result: { summary: "Read vocab.db.", contracts: [], adrNeeded: [], openQuestions: [] } },
     ]);
-    const designed = await design({ db: f.db.pool, forge: f.forge, runRole: designFake.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT }, workItem);
+    const designed = await design({ db: f.db.pool, forge: f.forge, target: TARGET, runRole: designFake.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT }, workItem);
     if (designed.kind !== "advance") throw new Error("design did not advance");
-    await awaitApproval({ db: f.db.pool, forge: f.forge }, designed.workItem, "token", "design");
+    await awaitApproval({ db: f.db.pool, forge: f.forge, target: TARGET }, designed.workItem, "token", "design");
 
     // While the design approval is open, Plan refuses to run.
     await expect(plan(planContext([PLAN_STEP]).ctx, designed.workItem)).rejects.toThrow(/approval/);
 
     await closeApproval(f.db.pool, workItem.id, "miklospocsaji");
-    const transition = await plan(planContext([PLAN_STEP]).ctx, (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow);
+    const transition = await plan(planContext([PLAN_STEP]).ctx, (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow);
 
     expect(transition).toMatchObject({ kind: "advance", workItem: { state: "build" }, tasks: ["1.1", "1.2"] });
   });
@@ -171,7 +176,7 @@ describe("plan", { timeout: 30_000 }, () => {
     const head = remoteHead(f);
     const { ctx, calls } = planContext([]);
 
-    const transition = await plan(ctx, (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow);
+    const transition = await plan(ctx, (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow);
 
     expect(transition).toMatchObject({ kind: "advance", workItem: { state: "build" }, tasks: ["1.1", "1.2"] });
     expect(calls).toEqual([]);

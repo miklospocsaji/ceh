@@ -1,6 +1,6 @@
 // Step, the recording of build outcomes and the tick (add-build-loop task 3.7): a fake build runner
 // writing outcomes to an FsStore, a fake classifier, the real local ledger and a temp remote.
-import { listAttempts, listMessages, listTasks, workItemCost, type AttemptRow, type WorkItemRow } from "@vocab/factory-ledger";
+import { listAttempts, listMessages, listTasks, workItemCost, type AttemptRow, type WorkItemRow } from "@ceh/factory-ledger";
 import { describe, expect, it } from "vitest";
 import type { ArtifactStore } from "../src/build-io.ts";
 import { MAX_IMPLEMENTER_ATTEMPTS, MAX_INFRA_FAILURES, step, type StepContext, type StepResult } from "../src/step.ts";
@@ -41,6 +41,8 @@ describe("step", { timeout: 60_000 }, () => {
     expect(await step(h.ctx, await current(), "1.1")).toMatchObject({ kind: "build", afterWait: false });
     expect(h.build.calls.map((call) => [call.next.role, call.next.mode])).toEqual([["test-author", "session"]]);
     expect(h.build.calls[0]?.input.baseCommit).toBe(planHead);
+    // The input names the target, so the build container loads the same config.
+    expect((h.build.calls[0]?.input as { target?: string } | undefined)?.target).toBe("vocab");
 
     // Its tests are one commit by the bot on the plan's commit, holding the test and the stub only.
     const testsCommit = remoteHead(f);

@@ -14,7 +14,6 @@ export type { ArtifactStore, NextBuild, RunBuild } from "./build-io.ts";
 export { MAX_DESIGN_FLAWS, MAX_IMPLEMENTER_ATTEMPTS, MAX_INFRA_FAILURES, MAX_TEST_AUTHOR_ATTEMPTS, step } from "./step.ts";
 export type { StepContext, StepResult } from "./step.ts";
 export { openPr } from "./open-pr.ts";
-export type { OpenPrContext } from "./open-pr.ts";
 export { APPROVAL_INSTRUCTION, DESIGN_APPROVAL_INSTRUCTION, renderDesignSummary, renderProposalSummary } from "./summary.ts";
 export type { DesignSummaryInput, ProposalCost, ProposalSummaryInput } from "./summary.ts";
 export { ESCALATION_REASON, ESCALATION_REASONS, WORKER_EXIT } from "./exit-codes.ts";

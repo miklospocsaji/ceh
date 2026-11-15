@@ -3,7 +3,7 @@
  * call, and can be told to fail the next SendTaskSuccess, as an expired token or a throttled
  * call would.
  */
-import type { TaskTokens } from "@vocab/factory-orchestrator";
+import type { TaskTokens } from "@ceh/factory-orchestrator";
 
 export class FakeTaskTokens implements TaskTokens {
   readonly successes: { taskToken: string; output: string }[] = [];

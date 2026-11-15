@@ -302,7 +302,7 @@ describe("GitHubForge with a token provider", () => {
 });
 
 describe("appCommitter", () => {
-  const SLUG = "vocab-factory";
+  const SLUG = "ceh-app";
   const BOT_ID = 41898282;
   const APP_TOKEN = "ghs_installationTokenForTests0123456789";
 

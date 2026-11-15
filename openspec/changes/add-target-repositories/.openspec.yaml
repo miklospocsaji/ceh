@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-14
+goal: "M3.25 step 3: ceh works on a target repository it does not live in, described by
+  targets/<project>/target.yaml, with a build image per target and work items keyed by repository"
+x-complexity: large

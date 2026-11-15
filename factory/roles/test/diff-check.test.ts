@@ -6,9 +6,10 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, truncateSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { HookJSONOutput, Options } from "@anthropic-ai/claude-agent-sdk";
-import { ImplementationResult, TestResult } from "@vocab/factory-artifacts";
+import type { ImplementationResult, TestResult } from "@ceh/factory-artifacts";
+import { loadTarget } from "@ceh/factory-target";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writableFor, type Role } from "../src/config.ts";
+import { loadRole, writableFor, type Role } from "../src/config.ts";
 import { diffCheck, diffPatch } from "../src/diff-check.ts";
 import { createRunner, type Recorder, type WorkItem } from "../src/runner.ts";
 import { fakeQuery, success } from "./fake-session.ts";
@@ -19,10 +20,6 @@ const SOURCE = "app/domain/src/word.ts";
 const TEST = "app/domain/test/word.test.ts";
 const STUB = "app/domain/src/lemma.ts";
 const ORIGINAL_TEST = 'it("Scenario: Words are counted", () => {});\n';
-
-const BASH_ALLOW = ["Bash(pnpm typecheck)", "Bash(pnpm lint)", "Bash(pnpm exec vitest run:*)", "Bash(git status:*)", "Bash(git diff:*)"];
-const IMPLEMENTER_GLOBS = ["app/*/src/**", "!app/contracts/**", "infra/app-stack.ts", "infra/preview-stack.ts", "infra/app/**"];
-const TEST_AUTHOR_GLOBS = ["app/*/test/**", "app/e2e/**", "{taskStubs}"];
 
 const ENV = { HOME: "/home/factory", PATH: "/usr/bin:/bin", CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-value" };
 
@@ -48,27 +45,11 @@ function read(path: string): string {
   return readFileSync(join(repo, path), "utf8");
 }
 
-function buildRole(name: string, writable: string[]): Role {
-  const testAuthor = name === "test-author";
-  return {
-    name,
-    model: "claude-sonnet-5-5",
-    runsIn: "build",
-    tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
-    allow: ["Read", "Grep", "Glob", "Edit", "Write", ...BASH_ALLOW],
-    writable,
-    skills: [],
-    maxTurns: 5,
-    maxBudgetUsd: 0.1,
-    resultSchema: testAuthor ? "test-result" : "implementation-result",
-    authMode: "subscription",
-    prompt: `You are the ${name}.`,
-    schema: testAuthor ? TestResult : ImplementationResult,
-  };
-}
-
-const implementer = buildRole("implementer", IMPLEMENTER_GLOBS);
-const testAuthor = buildRole("test-author", TEST_AUTHOR_GLOBS);
+// The real build roles, resolved for the vocab target: its globs are the boundary under test.
+const VOCAB = await loadTarget("vocab");
+const implementer = await loadRole("implementer", VOCAB);
+const testAuthor = await loadRole("test-author", VOCAB);
+const IMPLEMENTER_GLOBS = implementer.writable;
 const IMPLEMENTED: ImplementationResult = { summary: "Counted the words.", notes: "" };
 const TESTED: TestResult = { tests: [{ file: TEST, scenario: "Words are counted" }], stubs: [STUB], notes: "" };
 

@@ -5,7 +5,7 @@
  * The orchestrator opens the attempt before running the role and closes it afterwards.
  */
 import type { ApiKeySource, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Recorder } from "@vocab/factory-roles";
+import type { Recorder } from "@ceh/factory-roles";
 import type { Db } from "./db.ts";
 import type { AuthMode } from "./queries.ts";
 

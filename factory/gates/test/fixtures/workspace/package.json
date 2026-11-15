@@ -3,9 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p .",
-    "lint": "eslint .",
-    "typecheck:app": "tsc -p tsconfig.app.json",
-    "lint:app": "eslint app/"
+    "typecheck": "tsc -p tsconfig.app.json",
+    "lint": "eslint app/"
   }
 }

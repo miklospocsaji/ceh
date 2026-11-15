@@ -5,12 +5,15 @@
  * for the task's record.
  */
 import { execFileSync } from "node:child_process";
-import { DesignResult } from "@vocab/factory-artifacts";
+import { DesignResult } from "@ceh/factory-artifacts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadRole, type Role } from "../src/config.ts";
 import { isWritable } from "../src/guard.ts";
 import { createCostLog, outcomeOf, runProbe, type LiveAttempt } from "./live-harness.ts";
 import { apiKeyEnv, capped, CHANGE, CHANGE_ID, ISSUE, LIVE_CAP_USD, makeChangeRepo, OPENSPEC, readIfExists, report, type ChangeRepo } from "./live-change.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 let repo: ChangeRepo;
 let role: Role;
@@ -20,7 +23,7 @@ const costs = createCostLog();
 beforeAll(async () => {
   const env = apiKeyEnv();
   repo = makeChangeRepo("none");
-  role = capped(await loadRole("architect"));
+  role = capped(await loadRole("architect", TARGET));
   attempt = await runProbe(role, repo.root, { env, changeId: CHANGE_ID, issue: ISSUE, changeFiles: repo.changeFiles(), specs: repo.specs() });
   costs.track("architect", attempt);
   report("architect", attempt, { changed: repo.changedPaths(), "design.md": readIfExists(repo.root, `${CHANGE}/design.md`) ?? "(none)" });

@@ -6,10 +6,12 @@
  * `auth-mode-mismatch` (ADR 0006), the work item escalates and the issue gets a comment.
  */
 import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { closeAttempt, listAttempts, openAttempt, setWorkItemState, type AttemptRow, type WorkItemRow } from "@vocab/factory-ledger";
-import { AttemptFailed, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { ProposalResult } from "@ceh/factory-artifacts";
+import { closeAttempt, listAttempts, openAttempt, setWorkItemState, type AttemptRow, type WorkItemRow } from "@ceh/factory-ledger";
+import { AttemptFailed, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { changeFiles, currentSpecs, exists } from "./change-files.ts";
 import { renderEvidence } from "./evidence.ts";
 import { commitChange, ensureWorktree, type GitIdentity } from "./git.ts";
@@ -85,6 +87,14 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
       if (error.reason === "auth-mode-mismatch") break;
       continue;
     }
+    // Capabilities are the target's own, so no list checks them: the result must name exactly
+    // the change's delta specs (add-target-repositories, "Capabilities are the target's own").
+    const mismatch = await capabilityMismatch(worktree, item.changeId, result);
+    if (mismatch !== undefined) {
+      await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "invalid-result" });
+      last = new AttemptFailed("invalid-result", mismatch);
+      continue;
+    }
     // The validated result stays on its attempt, so later states (the summary in the cloud) read it from the ledger.
     await closeAttempt(db, attempt.id, { outcome: "succeeded", result });
 
@@ -114,6 +124,20 @@ async function escalate(ctx: ProposalContext, item: WorkItemRow, used: number, l
   await ctx.forge.comment(item.issueNumber, body);
   const workItem = await setWorkItemState(ctx.db, item.id, ESCALATED);
   return { kind: "escalate", workItem, reason: `proposal escalated after ${String(used)} attempt(s): ${reason}` };
+}
+
+/** How the result's capabilities differ from the folders under the change's `specs/`; undefined if they agree. */
+async function capabilityMismatch(worktree: string, changeId: string, result: unknown): Promise<string | undefined> {
+  const parsed = ProposalResult.safeParse(result);
+  if (!parsed.success) return undefined;
+  const named = new Set(parsed.data.capabilities);
+  const entries = await readdir(join(worktree, "openspec/changes", changeId, "specs"), { withFileTypes: true }).catch(() => []);
+  const written = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
+  const problems = [
+    ...[...named].filter((name) => !written.has(name)).map((name) => `The result names the capability \`${name}\`, but the change has no delta spec \`specs/${name}/spec.md\`.`),
+    ...[...written].filter((name) => !named.has(name)).map((name) => `The change has a delta spec for \`${name}\`, but the result's capabilities leave it out.`),
+  ];
+  return problems.length === 0 ? undefined : `${problems.join("\n")}\nName exactly the capabilities the change has delta specs for.`;
 }
 
 /** `openspec new change <id>`, unless the change folder exists already (a re-run). */

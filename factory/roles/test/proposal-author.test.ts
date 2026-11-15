@@ -2,11 +2,14 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { HookJSONOutput, Options, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk";
-import { ProposalResult } from "@vocab/factory-artifacts";
+import { ProposalResult } from "@ceh/factory-artifacts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadRole, writableFor } from "../src/config.ts";
 import { createPathGuard } from "../src/guard.ts";
 import { AttemptFailed, createRunner, type QueryFn } from "../src/runner.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 const ROLE = "proposal-author";
 const CHANGE_ID = "add-sample";
@@ -25,7 +28,7 @@ afterEach(() => {
 
 // The real guard decides, so these tests check the globs as the runner enforces them.
 async function decide(filePath: string): Promise<string | undefined> {
-  const role = await loadRole(ROLE);
+  const role = await loadRole(ROLE, TARGET);
   const guard = createPathGuard({ role: ROLE, worktree, writable: writableFor(role, CHANGE_ID) });
   const input: PreToolUseHookInput = {
     hook_event_name: "PreToolUse",
@@ -43,7 +46,7 @@ async function decide(filePath: string): Promise<string | undefined> {
 
 describe("proposal-author role", () => {
   it("loads with its model, limits and result schema", async () => {
-    const role = await loadRole(ROLE);
+    const role = await loadRole(ROLE, TARGET);
     expect(role).toMatchObject({
       name: ROLE,
       model: "claude-opus-5-5",
@@ -60,7 +63,7 @@ describe("proposal-author role", () => {
   });
 
   it("allows WebFetch only with the two GitHub domain rules", async () => {
-    const role = await loadRole(ROLE);
+    const role = await loadRole(ROLE, TARGET);
     expect(role.tools).toContain("WebFetch");
     expect(role.allow.filter((rule) => rule.startsWith("WebFetch")).sort()).toEqual([
       "WebFetch(domain:github.com)",
@@ -69,7 +72,7 @@ describe("proposal-author role", () => {
   });
 
   it("Scenario: Proposal author cannot run commands", async () => {
-    const role = await loadRole(ROLE);
+    const role = await loadRole(ROLE, TARGET);
     expect([...role.tools].sort()).toEqual(["Edit", "Glob", "Grep", "Read", "WebFetch", "Write"]);
 
     // The session the runner actually starts, not only the config it reads.
@@ -88,11 +91,12 @@ describe("proposal-author role", () => {
   });
 
   it("has a prompt, without frontmatter, that neither offers Bash nor tells the role to run openspec", async () => {
-    const role = await loadRole(ROLE);
+    const role = await loadRole(ROLE, TARGET);
     const file = readFileSync(resolve(import.meta.dirname, "..", `${ROLE}.md`), "utf8");
     expect(file).not.toMatch(/^\s*---/);
     expect(file).not.toMatch(/\bBash\b/);
-    expect(role.prompt).toBe(file.trim());
+    // The prompt is the file, with the target filled in.
+    expect(role.prompt).toBe(file.trim().replaceAll("{target.repository}", TARGET.repository));
     expect(role.prompt).not.toMatch(/\b[Rr]un `openspec/);
   });
 

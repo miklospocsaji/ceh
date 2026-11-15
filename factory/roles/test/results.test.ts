@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ReviewResult } from "@vocab/factory-artifacts";
+import { ReviewResult } from "@ceh/factory-artifacts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Role } from "../src/config.ts";
 import { AttemptFailed, createRunner, type QueryFn } from "../src/runner.ts";

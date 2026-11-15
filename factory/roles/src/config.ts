@@ -1,12 +1,14 @@
 /**
- * Loads a role: `factory/roles/<role>.yaml`, validated with zod, plus its prompt from
- * `factory/roles/<role>.md`, which is never in `.claude/agents` (ADR 0012). An invalid config or
- * a missing prompt throws a RoleConfigError naming the role and the field, before any session
- * starts.
+ * Loads a role for a target: `factory/roles/<role>.yaml`, validated with zod, plus its prompt
+ * from `factory/roles/<role>.md`, which is never in `.claude/agents` (ADR 0012). The role files
+ * name no target: their `{target.…}` placeholders are filled from the target's config (ADR 0014).
+ * An invalid config, a missing prompt or a placeholder the target cannot fill throws a
+ * RoleConfigError naming the role and the field, before any session starts.
  */
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { resultSchemas } from "@vocab/factory-artifacts";
+import { resultSchemas } from "@ceh/factory-artifacts";
+import type { Target } from "@ceh/factory-target";
 import { escape } from "minimatch";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -14,6 +16,10 @@ import { z } from "zod";
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const CHANGE_ID = "{changeId}";
 const TASK_STUBS = "{taskStubs}";
+/** A whole `writable` entry: the role's globs from the target. */
+const TARGET_WRITABLE = "{target.writable}";
+/** Any placeholder a target fills, resolved or not. */
+const TARGET_PLACEHOLDER = /\{target\.[^}]*\}/g;
 
 /** True for the Bash tool and for any `Bash(...)` rule. */
 const isBash = (entry: string): boolean => entry === "Bash" || entry.startsWith("Bash(");
@@ -65,8 +71,8 @@ export const RoleConfigSchema = z.strictObject({
   allow: z.array(z.string().min(1)),
   /**
    * Globs relative to the worktree; `{changeId}` is filled in per work item. A `!` glob excludes
-   * what it matches. The entry `{taskStubs}` stands for the task's new source files. Empty means
-   * read-only.
+   * what it matches. The entry `{taskStubs}` stands for the task's new source files, and the
+   * entry `{target.writable}` for the role's globs in the target's config. Empty means read-only.
    */
   writable: z.array(z.string().min(1)),
   skills: z.array(z.string().min(1)),
@@ -110,7 +116,7 @@ export interface LoadRoleOptions {
   root?: string;
 }
 
-export async function loadRole(name: string, options: LoadRoleOptions = {}): Promise<Role> {
+export async function loadRole(name: string, target: Target, options: LoadRoleOptions = {}): Promise<Role> {
   const root = options.root ?? REPO_ROOT;
   const configPath = join("factory/roles", `${name}.yaml`);
   const promptPath = join("factory/roles", `${name}.md`);
@@ -123,21 +129,59 @@ export async function loadRole(name: string, options: LoadRoleOptions = {}): Pro
     throw new RoleConfigError(name, "config", `${configPath} is not valid YAML: ${String(error)}`);
   }
 
-  const parsed = RoleConfigSchema.safeParse(data);
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    const field = issue?.path.join(".") || "config";
-    throw new RoleConfigError(name, field, issue?.message ?? "invalid");
+  // Checked twice: as written, for its shape, and resolved for the target, so the deny list
+  // also covers the commands the target brings.
+  const written = checked(name, data);
+  if (written.name !== name) {
+    throw new RoleConfigError(name, "name", `${configPath} names the role ${written.name}`);
   }
-  const config = parsed.data;
-  if (config.name !== name) {
-    throw new RoleConfigError(name, "name", `${configPath} names the role ${config.name}`);
+  const globs = target.writable[name];
+  if (globs !== undefined && !written.writable.includes(TARGET_WRITABLE)) {
+    throw new RoleConfigError(name, "writable", `target ${target.name} gives the role writable paths, but ${configPath} has no ${TARGET_WRITABLE} entry`);
   }
+  const values = targetValues(target);
+  const config = checked(name, {
+    ...written,
+    allow: written.allow.map((rule) => fill(name, "allow", rule, values)),
+    writable: written.writable.flatMap((glob) => (glob === TARGET_WRITABLE ? (globs ?? []) : [fill(name, "writable", glob, values)])),
+  });
 
-  const prompt = stripFrontmatter(await readText(name, "prompt", root, promptPath));
+  const prompt = fill(name, "prompt", stripFrontmatter(await readText(name, "prompt", root, promptPath)), values);
   const schema = resultSchemas[config.resultSchema];
   if (schema === undefined) throw new RoleConfigError(name, "resultSchema", "unknown result schema");
   return { ...config, prompt, schema };
+}
+
+function checked(name: string, data: unknown): RoleConfig {
+  const parsed = RoleConfigSchema.safeParse(data);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  throw new RoleConfigError(name, issue?.path.join(".") || "config", issue?.message ?? "invalid");
+}
+
+/** What each `{target.…}` placeholder stands for. A role's globs read as code spans, for the prompts. */
+function targetValues(target: Target): Map<string, string> {
+  const values = new Map([
+    ["{target.name}", target.name],
+    ["{target.repository}", target.repository],
+    ["{target.contracts}", target.contracts.replace(/\/$/, "")],
+    ["{target.typecheck}", target.commands.typecheck],
+    ["{target.lint}", target.commands.lint],
+    ["{target.unit}", target.commands.unit],
+  ]);
+  for (const [role, globs] of Object.entries(target.writable)) {
+    values.set(`{target.writable.${role}}`, globs.map((glob) => `\`${glob}\``).join(", "));
+  }
+  return values;
+}
+
+/** `text` with its placeholders filled; one the target has no value for fails the load. */
+function fill(role: string, field: string, text: string, values: ReadonlyMap<string, string>): string {
+  return text.replaceAll(TARGET_PLACEHOLDER, (placeholder) => {
+    const value = values.get(placeholder);
+    if (value === undefined) throw new RoleConfigError(role, field, `the target has no value for ${placeholder}`);
+    return value;
+  });
 }
 
 /**

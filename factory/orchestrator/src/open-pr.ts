@@ -1,21 +1,16 @@
 /**
  * Open PR (add-build-loop design, "Worker states"): once every task is ticked, finds the change
- * branch's open pull request or opens one into `master`, comments its link on the issue, and sets
+ * branch's open pull request or opens one into the target's default branch, comments its link on the issue, and sets
  * `pr-open`. The body lists the tasks, each role's tokens and estimated cost from the ledger, and
  * the issue. A repeated run reuses the open pull request and, once `pr-open`, comments no more.
  */
-import { listAttemptUsage, listAttempts, listTasks, setWorkItemState, type WorkItemRow } from "@vocab/factory-ledger";
+import { listAttemptUsage, listAttempts, listTasks, setWorkItemState, type WorkItemRow } from "@ceh/factory-ledger";
 import { NotApplicable } from "./approval.ts";
 import type { HandlerContext, Transition } from "./handler.ts";
 
 const PR_OPEN = "pr-open";
 
-export interface OpenPrContext extends HandlerContext {
-  /** The branch the pull request merges into; defaults to `master`. */
-  base?: string;
-}
-
-export async function openPr(ctx: OpenPrContext, item: WorkItemRow): Promise<Transition> {
+export async function openPr(ctx: HandlerContext, item: WorkItemRow): Promise<Transition> {
   if (item.state === PR_OPEN) return { kind: "advance", workItem: item };
   if (item.state !== "build") throw new NotApplicable(`work item ${item.changeId} is ${item.state}, not building`);
   const tasks = await listTasks(ctx.db, item.id);
@@ -30,7 +25,7 @@ export async function openPr(ctx: OpenPrContext, item: WorkItemRow): Promise<Tra
     existing ??
     (await ctx.forge.openPullRequest({
       head: item.branch,
-      base: ctx.base ?? "master",
+      base: ctx.target.defaultBranch,
       title: `${item.changeId}: ${issue.title}`,
       body: await renderBody(ctx, item, tasks),
     }));
@@ -47,7 +42,7 @@ interface RoleCost {
   usd: number;
 }
 
-async function renderBody(ctx: OpenPrContext, item: WorkItemRow, tasks: Awaited<ReturnType<typeof listTasks>>): Promise<string> {
+async function renderBody(ctx: HandlerContext, item: WorkItemRow, tasks: Awaited<ReturnType<typeof listTasks>>): Promise<string> {
   const usage = new Map((await listAttemptUsage(ctx.db, item.id)).map((row) => [row.attemptId, row]));
   const roles = new Map<string, RoleCost>();
   const attempts = await listAttempts(ctx.db, item.id);

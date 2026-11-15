@@ -1,6 +1,6 @@
 // The design-flaw path (add-build-loop task 3.9): step, Design, Plan and step again, with fake roles.
-import { findWorkItemByIssue, LedgerRecorder, listTasks, type WorkItemRow } from "@vocab/factory-ledger";
-import { loadRole, type Role } from "@vocab/factory-roles";
+import { findWorkItemByIssue, LedgerRecorder, listTasks, type WorkItemRow } from "@ceh/factory-ledger";
+import { loadRole, type Role } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { approved } from "../src/approval.ts";
 import { design } from "../src/design.ts";
@@ -10,6 +10,11 @@ import { step } from "../src/step.ts";
 import { buildTask, classified, currentWorkItem, codeFor, testsFor, useBuildHarness } from "./build-harness.ts";
 import { createFakeRoleRunner, type FakeStep } from "./fake-role-runner.ts";
 import { BOT, CHANGE, CHANGE_ID, git, ISSUE, planPaths, planStep, proposedWorkItem, remoteHead, useWorkItemFixture } from "./work-item-fixture.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 const f = useWorkItemFixture("design_flaw");
 const builds = useBuildHarness(f);
@@ -44,9 +49,9 @@ let designReviewer: Role;
 let planner: Role;
 
 beforeAll(async () => {
-  architect = await loadRole("architect");
-  designReviewer = await loadRole("design-reviewer");
-  planner = await loadRole("planner");
+  architect = await loadRole("architect", TARGET);
+  designReviewer = await loadRole("design-reviewer", TARGET);
+  planner = await loadRole("planner", TARGET);
 });
 
 function roles(steps: FakeStep[]) {
@@ -55,7 +60,7 @@ function roles(steps: FakeStep[]) {
 
 /** A `medium` change through Approved, Design with the reviewer's approval, and a three-task Plan. */
 async function plannedMediumWorkItem(): Promise<WorkItemRow> {
-  const ctx = { db: f.db.pool, forge: f.forge };
+  const ctx = { db: f.db.pool, forge: f.forge, target: TARGET };
   const routed = await approved({ ...ctx, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) }, await proposedWorkItem(f, "medium"));
   if (routed.kind !== "advance") throw new Error("approved did not advance");
   const designed = await design({ ...ctx, runRole: roles([architectStep("Store each lookup."), APPROVE]).runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT }, routed.workItem);
@@ -83,7 +88,7 @@ describe("design flaws", { timeout: 120_000 }, () => {
     // The architect runs with the evidence, then the reviewer.
     const designRoles = roles([architectStep("Store the whole import in one transaction."), APPROVE]);
     const redesigned = await design(
-      { db: f.db.pool, forge: f.forge, runRole: designRoles.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT },
+      { db: f.db.pool, forge: f.forge, target: TARGET, runRole: designRoles.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT },
       await currentWorkItem(f),
     );
     expect(redesigned).toMatchObject({ kind: "advance", route: "plan", workItem: { state: "plan" } });
@@ -93,8 +98,8 @@ describe("design flaws", { timeout: 120_000 }, () => {
 
     // The planner re-plans; the ticked tasks stay ticked and keep their commits.
     const replanned = await plan(
-      { db: f.db.pool, forge: f.forge, runRole: roles([planStep(REPLANNED_MD, { tasks: [T1, T2, T3_NEW, T4] })]).runRole, planner, planPaths: await planPaths(), repo: f.repo, home: f.home, committer: BOT },
-      (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow,
+      { db: f.db.pool, forge: f.forge, target: TARGET, runRole: roles([planStep(REPLANNED_MD, { tasks: [T1, T2, T3_NEW, T4] })]).runRole, planner, planPaths: await planPaths(), repo: f.repo, home: f.home, committer: BOT },
+      (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow,
     );
     expect(replanned).toMatchObject({ kind: "advance", workItem: { state: "build" }, tasks: ["1.3", "1.4"] });
     const tasksMd = git(f.remote, "show", `${remoteHead(f)}:${CHANGE}/tasks.md`);

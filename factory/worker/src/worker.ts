@@ -20,8 +20,8 @@
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { ForgeError, type Forge } from "@vocab/factory-forge";
-import { findWorkItemByIssue, migrate, waitForLedger, type WorkItemRow } from "@vocab/factory-ledger";
+import { ForgeError, type Forge } from "@ceh/factory-forge";
+import { findWorkItemByIssue, migrate, waitForLedger, type WorkItemRow } from "@ceh/factory-ledger";
 import {
   approve,
   approved,
@@ -43,12 +43,13 @@ import {
   type StepResult,
   type TaskTokens,
   type Transition,
-} from "@vocab/factory-orchestrator";
-import type { Role, RunRole } from "@vocab/factory-roles";
+} from "@ceh/factory-orchestrator";
+import type { Role, RunRole } from "@ceh/factory-roles";
+import type { Target } from "@ceh/factory-target";
 import type pg from "pg";
 import { ENV, parseWorkerArgs, USAGE, type WorkerArgs, type WorkerState } from "./config.ts";
 
-export { WORKER_EXIT } from "@vocab/factory-orchestrator";
+export { WORKER_EXIT } from "@ceh/factory-orchestrator";
 
 /** What AwaitApproval reports with SendTaskFailure: fixed text, never an error's message. */
 export const AWAIT_APPROVAL_FAILURE = { error: "factory.AwaitApprovalFailed", cause: "The await-approval worker task failed; see its log." } as const;
@@ -75,6 +76,8 @@ export interface WorkerRoles {
 }
 
 export interface WorkerDeps {
+  /** The repository this worker serves, from FACTORY_TARGET (ADR 0014). */
+  target: Target;
   /** A pool, since migrations take a client of their own. */
   db: pg.Pool;
   forge: Forge;
@@ -158,23 +161,23 @@ function requireTaskTokens(deps: WorkerDeps): TaskTokens {
 
 async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | undefined): Promise<number> {
   const { state, issueNumber } = args;
-  const { db, forge } = deps;
+  const { db, forge, target } = deps;
   const issue = `issue #${String(issueNumber)}`;
   switch (state) {
     case "intake":
     case "proposal":
       return report(state, issueNumber, await runHandler(args, deps), deps);
     case "await-approval": {
-      const workItem = await requireWorkItem(db, issueNumber);
+      const workItem = await requireWorkItem(deps, issueNumber);
       const kind = args.kind ?? "proposal";
-      await awaitApproval({ db, forge, readProposal: (item) => readProposal(item, deps) }, workItem, token?.value ?? "", kind);
+      await awaitApproval({ db, forge, target, readProposal: (item) => readProposal(item, deps) }, workItem, token?.value ?? "", kind);
       deps.out(`factory-worker: await-approval for ${issue}: work item ${workItem.changeId} awaits the owner's ${kind} approval\n`);
       return WORKER_EXIT.ok;
     }
     case "approve": {
       let outcome;
       try {
-        outcome = await approve({ db, forge, taskTokens: requireTaskTokens(deps) }, issueNumber, args.by ?? "");
+        outcome = await approve({ db, forge, target, taskTokens: requireTaskTokens(deps) }, issueNumber, args.by ?? "");
       } catch (error) {
         // M2's exit run: a failed approve left the owner with no answer. Fixed text only.
         await forge.comment(issueNumber, APPROVE_FAILED_COMMENT).catch((commentError: unknown) => {
@@ -202,14 +205,14 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       break;
     }
     case "approved": {
-      const transition = await approved({ db, forge, readChangeFile: (item, path) => readChangeFile(item, path, deps) }, await requireWorkItem(db, issueNumber));
+      const transition = await approved({ db, forge, target, readChangeFile: (item, path) => readChangeFile(item, path, deps) }, await requireWorkItem(deps, issueNumber));
       const code = report(state, issueNumber, transition, deps);
       return transition.kind === "advance" && transition.route === "plan" ? WORKER_EXIT.skipDesign : code;
     }
     case "design": {
-      const workItem = await requireWorkItem(db, issueNumber);
+      const workItem = await requireWorkItem(deps, issueNumber);
       const repo = await freshClone(deps);
-      const transition = await design({ db, forge, runRole: deps.runRole, ...deps.roles, repo, home: deps.home, ...committer(deps) }, workItem);
+      const transition = await design({ db, forge, target, runRole: deps.runRole, ...deps.roles, repo, home: deps.home, ...committer(deps) }, workItem);
       const code = report(state, issueNumber, transition, deps);
       return transition.kind === "advance" && transition.route === "owner-review" ? WORKER_EXIT.ownerDesignReview : code;
     }
@@ -217,16 +220,16 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       return runPlan(args, deps, token);
     case "step": {
       if (args.taskId === undefined) throw new InvalidInput("step needs --task");
-      const workItem = await requireWorkItem(db, issueNumber);
+      const workItem = await requireWorkItem(deps, issueNumber);
       const repo = await freshClone(deps);
       const result = await step({ ...stepContext(deps), repo }, workItem, args.taskId);
       return reportStep(issueNumber, args.taskId, result, deps);
     }
     case "open-pr":
-      return report(state, issueNumber, await openPr({ db, forge }, await requireWorkItem(db, issueNumber)), deps);
+      return report(state, issueNumber, await openPr({ db, forge, target }, await requireWorkItem(deps, issueNumber)), deps);
     case "escalate": {
       if (args.reason === undefined) throw new InvalidInput("escalate needs --reason");
-      const workItem = await escalateWorkItem({ db, forge }, issueNumber, args.reason);
+      const workItem = await escalateWorkItem({ db, forge, target }, issueNumber, args.reason);
       deps.out(`factory-worker: escalate for ${issue}: ${workItem === undefined ? "no work item" : `work item ${workItem.changeId} is ${workItem.state}`} (${args.reason})\n`);
       return WORKER_EXIT.ok;
     }
@@ -239,7 +242,7 @@ function committer(deps: WorkerDeps): { committer?: WorkerIdentity } {
 
 function stepContext(deps: WorkerDeps): Omit<StepContext, "repo"> {
   const { testAuthor, implementer, classifier } = deps.roles;
-  return { db: deps.db, forge: deps.forge, runRole: deps.runRole, testAuthor, implementer, classifier, store: deps.store, cloneUrl: deps.cloneUrl, home: deps.home, ...committer(deps) };
+  return { db: deps.db, forge: deps.forge, target: deps.target, runRole: deps.runRole, testAuthor, implementer, classifier, store: deps.store, cloneUrl: deps.cloneUrl, home: deps.home, ...committer(deps) };
 }
 
 /**
@@ -249,11 +252,11 @@ function stepContext(deps: WorkerDeps): Omit<StepContext, "repo"> {
  */
 async function runPlan(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | undefined): Promise<number> {
   if (token === undefined) throw new InvalidInput(`plan needs the task token in ${ENV.taskToken}`);
-  const workItem = await requireWorkItem(deps.db, args.issueNumber);
+  const workItem = await requireWorkItem(deps, args.issueNumber);
   const repo = await freshClone(deps);
   const { planner, testAuthor, implementer } = deps.roles;
   const transition = await plan(
-    { db: deps.db, forge: deps.forge, runRole: deps.runRole, planner, planPaths: { implementer: implementer.writable, testAuthor: testAuthor.writable }, repo, home: deps.home, ...committer(deps) },
+    { db: deps.db, forge: deps.forge, target: deps.target, runRole: deps.runRole, planner, planPaths: { implementer: implementer.writable, testAuthor: testAuthor.writable }, repo, home: deps.home, ...committer(deps) },
     workItem,
   );
   const code = report("plan", args.issueNumber, transition, deps);
@@ -283,8 +286,8 @@ function reportStep(issueNumber: number, taskId: string, result: StepResult, dep
   }
 }
 
-async function requireWorkItem(db: pg.Pool, issueNumber: number): Promise<WorkItemRow> {
-  const workItem = await findWorkItemByIssue(db, issueNumber);
+async function requireWorkItem(deps: WorkerDeps, issueNumber: number): Promise<WorkItemRow> {
+  const workItem = await findWorkItemByIssue(deps.db, deps.target.repository, issueNumber);
   if (workItem === undefined) throw new InvalidInput(`issue #${String(issueNumber)} has no work item; run intake first`);
   return workItem;
 }
@@ -309,26 +312,27 @@ async function readProposal(workItem: WorkItemRow, deps: WorkerDeps): Promise<st
 
 async function runHandler(args: WorkerArgs, deps: WorkerDeps): Promise<Transition> {
   const { state, issueNumber } = args;
-  const { db, forge } = deps;
+  const { db, forge, target } = deps;
   switch (state) {
     case "intake":
       try {
-        return await intake({ db, forge }, { issueNumber, ...(args.executionArn === undefined ? {} : { executionArn: args.executionArn }) });
+        return await intake({ db, forge, target }, { issueNumber, ...(args.executionArn === undefined ? {} : { executionArn: args.executionArn }) });
       } catch (error) {
         if (error instanceof ForgeError && error.kind === "not-found") throw new InvalidInput(`issue #${String(issueNumber)} not found`);
         throw error;
       }
     default: {
-      const workItem = await findWorkItemByIssue(db, issueNumber);
+      const workItem = await findWorkItemByIssue(db, target.repository, issueNumber);
       if (workItem === undefined) throw new InvalidInput(`issue #${String(issueNumber)} has no work item; run intake first`);
       // Past Proposal (or escalated): the handler returns at once, so clone nothing.
-      if (workItem.state !== "proposal") return proposal({ db, forge, runRole: deps.runRole, role: deps.role, repo: deps.home }, workItem);
+      if (workItem.state !== "proposal") return proposal({ db, forge, target, runRole: deps.runRole, role: deps.role, repo: deps.home }, workItem);
 
       const repo = await freshClone(deps);
       return proposal(
         {
           db,
           forge,
+          target,
           runRole: deps.runRole,
           role: deps.role,
           repo,

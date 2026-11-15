@@ -7,8 +7,11 @@
  * - compute: an ECS cluster and the `factory-worker` Fargate task definition (ADR 0010), plus a
  *   test-only boundary-check task definition: the same in everything but its image, which is
  *   the worker image plus Vitest. The state machine never runs it.
+ * - target (add-target-repositories, ADR 0014): the one repository the stack serves, from
+ *   `targets/<name>/target.yaml`: the webhook's repository and owner, `FACTORY_TARGET` on the
+ *   worker and build tasks, and the build task's image
  * - builds (add-build-loop, ADR 0011): the artifact bucket the worker and the build task share,
- *   and the build task definition from the Dockerfile's `build` target, holding only the API key,
+ *   and the build task definition from the target's build image, holding only the API key,
  *   with a task role limited to `work-items/*` in the bucket and a security group the ledger does
  *   not admit; and a test-only build boundary check, the build task with an `sh -c` entry point
  * - orchestration: the work item's Step Functions state machine (JSONata, from `definition()`),
@@ -48,8 +51,10 @@ import {
 } from "aws-cdk-lib/aws-rds";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { DefinitionBody, StateMachine } from "aws-cdk-lib/aws-stepfunctions";
-import { definition } from "@vocab/factory-orchestrator/state-machine";
-import { WEBHOOK_ENV } from "@vocab/factory-orchestrator/webhook-env";
+import { definition } from "@ceh/factory-orchestrator/state-machine";
+import { WEBHOOK_ENV } from "@ceh/factory-orchestrator/webhook-env";
+import type { Target } from "@ceh/factory-target";
+import { assembleBuildDockerfile } from "@ceh/factory-worker/image";
 import type { Construct } from "constructs";
 
 /** The state machine's name, fixed so the worker's task role can name it before it exists. */
@@ -58,8 +63,6 @@ export const STATE_MACHINE_NAME = "factory-work-item";
 export const BOUNDARY_CHECK_TARGET = "boundary-check";
 /** The worker's container in the task definition, which RunTask overrides name. */
 export const WORKER_CONTAINER = "worker";
-/** The worker Dockerfile's build container target (ADR 0010, amendment of 2026-11-09). */
-export const BUILD_TARGET = "build";
 /** The build container in its task definition. */
 export const BUILD_CONTAINER = "build";
 /** The store prefix the build task may read and write, and everything the worker exchanges with it. */
@@ -83,17 +86,16 @@ const LEDGER_PORT = 5432;
 const LEDGER_DATABASE = "factory";
 const MONTHLY_BUDGET_USD = 50;
 
+/** The factory's GitHub App. The repository and the owner are the target's. */
 export interface GitHubSettings {
-  /** `<owner>/<repo>`. */
-  repository: string;
   appId: number;
   installationId: number;
   slug: string;
-  /** The only login whose `/approve` counts (ADR 0009). */
-  owner: string;
 }
 
 export interface FactoryStackProps extends StackProps {
+  /** The repository the stack serves: one target, until a second is designed. */
+  target: Target;
   github: GitHubSettings;
   /** Where the budget alarm emails; deploy-time context, never committed. */
   budgetEmail: string;
@@ -123,7 +125,8 @@ export class FactoryStack extends Stack {
 
   constructor(scope: Construct, id: string, props: FactoryStackProps) {
     super(scope, id, props);
-    Tags.of(this).add("project", "vocab-factory");
+    const { target } = props;
+    Tags.of(this).add("project", "ceh");
 
     // Network: public subnets only (ADR 0008). Two AZs, because Aurora's subnet group needs two.
     const vpc = new Vpc(this, "Vpc", {
@@ -215,19 +218,24 @@ export class FactoryStack extends Stack {
     const parameter = (constructId: string, parameterName: string) =>
       StringParameter.fromSecureStringParameterAttributes(this, constructId, { parameterName });
 
-    // Both images from one Dockerfile and one staged context; the check is a target on top of the worker.
-    const image = (constructId: string, target?: string) =>
+    // Every image from one staged context; the check is a stage on top of the worker. The
+    // target's build image is the worker Dockerfile with the target's assembled after it
+    // (ADR 0010): under the allowlist's leading `*` CDK's own include of the Dockerfile does not
+    // reach a file in a folder, so the assembled file is let in by name.
+    const allowlist = dockerignore(resolve(REPO_ROOT, `${WORKER_DOCKERFILE}.dockerignore`));
+    const image = (constructId: string, stage?: string, file: string = WORKER_DOCKERFILE) =>
       ContainerImage.fromDockerImageAsset(
         new DockerImageAsset(this, constructId, {
           directory: REPO_ROOT,
-          file: WORKER_DOCKERFILE,
+          file,
           platform: Platform.LINUX_AMD64,
-          ...(target === undefined ? {} : { target }),
+          ...(stage === undefined ? {} : { target: stage }),
           // Stage only what the image's own allowlist lets in, so `.env*` never reaches cdk.out.
-          exclude: dockerignore(resolve(REPO_ROOT, `${WORKER_DOCKERFILE}.dockerignore`)),
+          exclude: file === WORKER_DOCKERFILE ? allowlist : [...allowlist, `!${file}`],
           ignoreMode: IgnoreMode.DOCKER,
         }),
       );
+    const targetBuild = assembleBuildDockerfile(target.name);
 
     const anthropicApiKey = EcsSecret.fromSsmParameter(parameter("AnthropicApiKey", PARAMETERS.anthropicApiKey));
     const container: Omit<ContainerDefinitionOptions, "image"> = {
@@ -235,7 +243,8 @@ export class FactoryStack extends Stack {
       environment: {
         FACTORY_AUTH_MODE: "api-key",
         FACTORY_STORE_BUCKET: this.artifactBucket.bucketName,
-        FACTORY_GITHUB_REPOSITORY: props.github.repository,
+        // The repository, its owner and its paths come from the target's config in the image.
+        FACTORY_TARGET: target.name,
         FACTORY_GITHUB_APP_ID: String(props.github.appId),
         FACTORY_GITHUB_APP_INSTALLATION_ID: String(props.github.installationId),
         FACTORY_GITHUB_APP_SLUG: props.github.slug,
@@ -271,9 +280,9 @@ export class FactoryStack extends Stack {
     this.buildTaskDefinition = new FargateTaskDefinition(this, "Build", buildSize);
     this.buildTaskDefinition.addToTaskRolePolicy(new PolicyStatement({ actions: ["s3:GetObject", "s3:PutObject"], resources: [workItemObjects] }));
     const buildContainer: ContainerDefinitionOptions = {
-      image: image("BuildImage", BUILD_TARGET),
+      image: image("BuildImage", targetBuild.stage, targetBuild.file),
       logging: LogDrivers.awsLogs({ logGroup, streamPrefix: "build" }),
-      environment: { FACTORY_AUTH_MODE: "api-key", FACTORY_STORE_BUCKET: this.artifactBucket.bucketName, NODE_OPTIONS: "--max-old-space-size=4096" },
+      environment: { FACTORY_AUTH_MODE: "api-key", FACTORY_STORE_BUCKET: this.artifactBucket.bucketName, FACTORY_TARGET: target.name, NODE_OPTIONS: "--max-old-space-size=4096" },
       secrets: { ANTHROPIC_API_KEY: anthropicApiKey },
       ulimits: [{ name: UlimitName.CORE, softLimit: 0, hardLimit: 0 }],
     };
@@ -350,8 +359,8 @@ export class FactoryStack extends Stack {
       bundling: { externalModules: [], minify: true, target: "node24" },
       environment: {
         [WEBHOOK_ENV.stateMachineArn]: this.stateMachine.stateMachineArn,
-        [WEBHOOK_ENV.repository]: props.github.repository,
-        [WEBHOOK_ENV.owner]: props.github.owner,
+        [WEBHOOK_ENV.repository]: target.repository,
+        [WEBHOOK_ENV.owner]: target.owner,
         [WEBHOOK_ENV.cluster]: workerTask.cluster,
         [WEBHOOK_ENV.taskDefinition]: workerTask.taskDefinition,
         [WEBHOOK_ENV.subnets]: Fn.join(",", workerTask.subnets),
@@ -419,7 +428,7 @@ function dockerignore(path: string): string[] {
     .filter((line) => line !== "" && !line.startsWith("#"));
 }
 
-/** The stack's settings from the app's context (cdk.json, and `-c budgetEmail=…` at deploy). */
+/** The stack's settings from the app's context (cdk.json, and `-c budgetEmail=…` at deploy). The repository and the owner are the target's. */
 export function factoryContext(scope: Construct): Pick<FactoryStackProps, "github" | "budgetEmail"> {
   const get = (key: string): unknown => scope.node.tryGetContext(key);
   const text = (key: string): string => {
@@ -438,11 +447,9 @@ export function factoryContext(scope: Construct): Pick<FactoryStackProps, "githu
   }
   return {
     github: {
-      repository: text("factory:githubRepository"),
       appId: integer("factory:githubAppId"),
       installationId: integer("factory:githubAppInstallationId"),
       slug: text("factory:githubAppSlug"),
-      owner: text("factory:owner"),
     },
     budgetEmail,
   };

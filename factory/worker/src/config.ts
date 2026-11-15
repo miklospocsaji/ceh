@@ -5,8 +5,9 @@
  */
 import { parseArgs } from "node:util";
 import type pg from "pg";
-import { connectionFromSecret, DATABASE_URL_VAR, LEDGER_SECRET_VAR } from "@vocab/factory-ledger";
-import { ESCALATION_REASONS, type EscalationReason } from "@vocab/factory-orchestrator";
+import { connectionFromSecret, DATABASE_URL_VAR, LEDGER_SECRET_VAR } from "@ceh/factory-ledger";
+import { ESCALATION_REASONS, type EscalationReason } from "@ceh/factory-orchestrator";
+import { loadTarget, repositoryParts, TargetConfigError, type Target } from "@ceh/factory-target";
 
 /** The states this worker runs: one per state machine state (add-cloud-proposal-run, add-build-loop). */
 export const WORKER_STATES = ["intake", "proposal", "await-approval", "approve", "approved", "design", "plan", "step", "open-pr", "escalate"] as const;
@@ -143,7 +144,8 @@ export const ENV = {
   taskToken: "FACTORY_TASK_TOKEN",
   /** The artifact bucket the worker and the build task share. */
   storeBucket: "FACTORY_STORE_BUCKET",
-  repository: "FACTORY_GITHUB_REPOSITORY",
+  /** The name of the target this worker serves: a folder under `targets/` in the image. */
+  target: "FACTORY_TARGET",
   appId: "FACTORY_GITHUB_APP_ID",
   installationId: "FACTORY_GITHUB_APP_INSTALLATION_ID",
   slug: "FACTORY_GITHUB_APP_SLUG",
@@ -157,6 +159,9 @@ export interface WorkerConfig {
    * tests from FACTORY_DATABASE_URL. The secret wins when both are set.
    */
   ledger: pg.PoolConfig;
+  /** The target named by FACTORY_TARGET, from its config in the image. */
+  target: Target;
+  /** The owner and name of the target's repository. */
   owner: string;
   repo: string;
   app: { appId: number; installationId: number; slug: string; privateKey: string };
@@ -167,13 +172,22 @@ export class WorkerConfigError extends Error {
   override readonly name = "WorkerConfigError";
 }
 
-export function workerConfig(env: Record<string, string | undefined>): WorkerConfig {
+/** Loads a target's config by name; the real one reads `targets/<name>/target.yaml`. */
+export type LoadTarget = (name: string) => Promise<Target>;
+
+export async function workerConfig(env: Record<string, string | undefined>, load: LoadTarget = (name) => loadTarget(name)): Promise<WorkerConfig> {
   const ledger = ledgerConnection(env);
 
-  const repository = required(env, ENV.repository);
-  const match = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)$/.exec(repository);
-  const [, owner, repo] = match ?? [];
-  if (owner === undefined || repo === undefined) throw new WorkerConfigError(`${ENV.repository} must be <owner>/<repo>`);
+  // The repository, its owner and its paths all come from the target's config (ADR 0014).
+  const name = required(env, ENV.target);
+  let target: Target;
+  try {
+    target = await load(name);
+  } catch (error) {
+    if (!(error instanceof TargetConfigError)) throw error;
+    throw new WorkerConfigError(`${ENV.target}: ${error.message}`);
+  }
+  const { owner, repo } = repositoryParts(target);
 
   const slug = required(env, ENV.slug);
   if (!/^[a-z0-9-]+$/.test(slug)) throw new WorkerConfigError(`${ENV.slug} must be the App's slug`);
@@ -186,6 +200,7 @@ export function workerConfig(env: Record<string, string | undefined>): WorkerCon
 
   return {
     ledger,
+    target,
     owner,
     repo,
     app: { appId: positiveInteger(env, ENV.appId), installationId: positiveInteger(env, ENV.installationId), slug, privateKey },

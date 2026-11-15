@@ -59,38 +59,52 @@ export function runCommand(worktree: string, command: string, args: readonly str
 }
 
 /**
- * The app's typecheck and lint only (add-build-loop, "Gates check only the app's code"): the
- * worktree's `typecheck:app` and `lint:app` scripts. A whole-repository lint ran out of heap in
- * the build task, and an app task has no business with factory code.
+ * The target's commands the gates run (its `target.yaml`; add-target-repositories, "Gates run the
+ * target's commands"). Each is plain words, split on spaces and run without a shell.
  */
-export function typecheck(worktree: string): Promise<CommandResult> {
-  return runCommand(worktree, "pnpm", ["typecheck:app"]);
+export type GateCommands = {
+  typecheck: string;
+  lint: string;
+  /** A Vitest run: the gates append their reporters and `unitTestPath`. */
+  unit: string;
+  /** What the unit command runs: its last argument. */
+  unitTestPath: string;
+  /** `{changeId}` is replaced by the change id. */
+  specValidate: string;
+};
+
+const CHANGE_ID = "{changeId}";
+
+/** Runs a target's command in the worktree, with any arguments the gates add after it. */
+function runTargetCommand(worktree: string, command: string, extra: readonly string[] = []): Promise<CommandResult> {
+  const [file = "", ...args] = command.split(" ");
+  return runCommand(worktree, file, [...args, ...extra]);
 }
 
-export function lint(worktree: string): Promise<CommandResult> {
-  return runCommand(worktree, "pnpm", ["lint:app"]);
+export function typecheck(worktree: string, commands: GateCommands): Promise<CommandResult> {
+  return runTargetCommand(worktree, commands.typecheck);
 }
 
-export function spec(worktree: string, changeId: string): Promise<CommandResult> {
-  return runCommand(worktree, "pnpm", ["exec", "openspec", "validate", changeId, "--strict", "--no-interactive"]);
+export function lint(worktree: string, commands: GateCommands): Promise<CommandResult> {
+  return runTargetCommand(worktree, commands.lint);
+}
+
+export function spec(worktree: string, commands: GateCommands, changeId: string): Promise<CommandResult> {
+  return runTargetCommand(worktree, commands.specValidate.replaceAll(CHANGE_ID, changeId));
 }
 
 /** The unit run's command result and its JSON report, or null when Vitest wrote none. */
 export type UnitRun = CommandResult & { report: unknown };
 
 /**
- * Runs the app's unit tests once, with the default reporter for the output (test logs and
+ * Runs the target's unit tests once, with the default reporter for the output (test logs and
  * failures) and the JSON reporter for the report the red check and coverage read.
  */
-export async function unit(worktree: string): Promise<UnitRun> {
+export async function unit(worktree: string, commands: GateCommands): Promise<UnitRun> {
   const dir = await mkdtemp(join(tmpdir(), "gates-vitest-"));
   try {
     const reportFile = join(dir, "report.json");
-    const result = await runCommand(worktree, "pnpm", [
-      "exec", "vitest", "run", "--project", "unit",
-      "--reporter=default", "--reporter=json", `--outputFile.json=${reportFile}`,
-      "app/",
-    ]);
+    const result = await runTargetCommand(worktree, commands.unit, ["--reporter=default", "--reporter=json", `--outputFile.json=${reportFile}`, commands.unitTestPath]);
     const report: unknown = await readFile(reportFile, "utf8").then((text) => JSON.parse(text) as unknown, () => null);
     return { ...result, report };
   } finally {

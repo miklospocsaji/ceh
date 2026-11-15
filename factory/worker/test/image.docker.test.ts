@@ -64,10 +64,32 @@ describe("factory-worker image", () => {
   });
 
   it("refuses an unknown state with exit 2, with no network access", () => {
-    const run = spawnSync("docker", ["run", "--rm", "--network", "none", IMAGE, "design", "--issue", "1"], { encoding: "utf8" });
+    // `deploy` is no state of the worker's; `design`, which this used to name, became one in M3.
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", IMAGE, "deploy", "--issue", "1"], { encoding: "utf8" });
 
     expect(run.status).toBe(2);
-    expect(run.stderr).toContain("unknown state design");
+    expect(run.stderr).toContain("unknown state deploy");
+  });
+
+  it("refuses to run without a target, or with one the image does not hold, with exit 2", () => {
+    const worker = (...env: string[]) =>
+      spawnSync("docker", ["run", "--rm", "--network", "none", "--env", "FACTORY_DATABASE_URL=postgres://factory:factory@localhost:1/factory", ...env.flatMap((entry) => ["--env", entry]), IMAGE, "intake", "--issue", "1"], {
+        encoding: "utf8",
+      });
+
+    const none = worker();
+    expect(none.status).toBe(2);
+    expect(none.stderr).toContain("FACTORY_TARGET");
+
+    const unknown = worker("FACTORY_TARGET=nosuch");
+    expect(unknown.status).toBe(2);
+    expect(unknown.stderr).toContain("FACTORY_TARGET");
+    expect(unknown.stderr).toContain("targets/nosuch/target.yaml is missing");
+
+    // With the target the image holds, the configuration gets past it, to the next missing variable.
+    const vocab = worker("FACTORY_TARGET=vocab");
+    expect(vocab.status).toBe(2);
+    expect(vocab.stderr).not.toContain("FACTORY_TARGET");
   });
 
   it("holds git, the pinned OpenSpec CLI and the role's config and prompt", () => {

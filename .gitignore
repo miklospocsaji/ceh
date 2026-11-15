@@ -5,3 +5,5 @@ coverage/
 *.tsbuildinfo
 .env*
 cdk.out/
+# Assembled build Dockerfiles (factory/worker/src/image.ts).
+.build/
