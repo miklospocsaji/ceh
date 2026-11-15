@@ -2,7 +2,7 @@
 
 ceh, a software factory that works on target repositories it does not live in. Each target is described in `targets/<name>/` (ADR 0014); the first is `vocab`. `docs/brief.md` is the source of truth; decisions live in `docs/adr/`.
 
-M3.25 is done (brief section 7): the stack in AWS is deployed from this repository and works on `vocab`; its exit run was `vocab` issue #20. Next is M3.5, still a draft to settle in a fresh session.
+M3.25 is done (brief section 7): the stack in AWS is deployed from this repository and works on `vocab`; its exit run was `vocab` issue #20. Next is M3.5, settled in `docs/m3.5-owner-commands.md`: three OpenSpec changes, in order `add-owner-commands`, `add-approval-feedback`, `add-work-item-resume`; none is started yet.
 
 ## Commands
 
@@ -40,7 +40,7 @@ M3.25 is done (brief section 7): the stack in AWS is deployed from this reposito
 ## Cloud runs
 
 - An issue labelled `factory` starts an execution of the `factory-work-item` state machine through the webhook. The owner's `/approve` comment runs the `approve` worker task, for a proposal or a `large` design. Every state is a `factory-worker <state> --issue <n>` Fargate task, except Build: the build loop runs `step` in the worker and each session in a `factory-build` Fargate task (8 GB, only the API key, no ledger access). The run ends with a pull request opened by `ceh-app[bot]`; the owner reviews and merges it.
-- A stopped or failed execution cannot be resumed (draft M3.5): relabelling ends in a `duplicate` Intake. Start again with a new issue.
+- A stopped or failed execution cannot be resumed until M3.5's `add-work-item-resume`: relabelling ends in a `duplicate` Intake. Start again with a new issue.
 - To follow a run (with `AWS_PROFILE=vocab AWS_REGION=eu-central-1`): `aws stepfunctions list-executions` and `get-execution-history` for the states, `aws logs tail` on the worker log group (one stream per task: `worker/worker/<task-id>` for worker states, `build/build/<task-id>` for build sessions; `--log-stream-name-prefix build/` follows only builds) and the webhook log group. The log group names are in the stack outputs.
 - Each build attempt's evidence is in the artifact bucket (`ArtifactBucketName` output), under `work-items/<change-id>/tasks/<task-id>/<role>/<n>/`: `input.json`, `patch.diff`, `gates.json`, `messages.jsonl` and `outcome.json`; the task's `next.json` names the next build. Objects expire after 180 days.
 - The ledger has no public address, so the laptop can't read it. `pnpm factory cost` doesn't work for cloud work items.
