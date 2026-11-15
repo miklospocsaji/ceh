@@ -1,6 +1,6 @@
 /**
- * The local build runner (add-build-loop design, "Local runs"): `docker run --rm` of the locally
- * built `build` image, with the store directory mounted at `/store`. The build reads its role,
+ * The local build runner (add-build-loop design, "Local runs"): `docker run --rm` of the target's
+ * locally built build image, with the store directory mounted at `/store`. The build reads its role,
  * input and, for a gates-only run, patch from the task's `next.json`, passed as arguments.
  * `docker` gets only the variables it needs to run, and the model credential, which it passes on
  * by name: the token never appears on the command line, and nothing else of the factory's
@@ -14,11 +14,8 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
-import { nextBuildKey, parseNextBuild, type RunBuild } from "@vocab/factory-orchestrator";
-import { checkKey, FsStore } from "@vocab/factory-worker/store";
-
-/** The tag of the locally built `build` target. */
-export const LOCAL_BUILD_IMAGE = "vocab-factory-build:local";
+import { nextBuildKey, parseNextBuild, type RunBuild } from "@ceh/factory-orchestrator";
+import { checkKey, FsStore } from "@ceh/factory-worker/store";
 
 /** Runs a command and resolves when it exits 0; rejects otherwise. */
 export type Exec = (file: string, args: readonly string[], options: { env: Record<string, string | undefined> }) => Promise<void>;
@@ -26,8 +23,8 @@ export type Exec = (file: string, args: readonly string[], options: { env: Recor
 export interface DockerBuildOptions {
   /** The host directory of the FsStore, mounted at `/store`. */
   storeDir: string;
-  /** Defaults to LOCAL_BUILD_IMAGE. */
-  image?: string;
+  /** The target's locally built build image (`localBuildImage`). */
+  image: string;
   /** The environment `docker` runs with; the model credential is passed from it by name. */
   env: Record<string, string | undefined>;
   /** Defaults to running the command with execFile. */
@@ -49,7 +46,7 @@ const defaultExec: Exec = async (file, args, options) => {
 };
 
 export function dockerBuildRunner(options: DockerBuildOptions): RunBuild {
-  const { storeDir, image = LOCAL_BUILD_IMAGE, env, exec = defaultExec } = options;
+  const { storeDir, image, env, exec = defaultExec } = options;
   const store = new FsStore(storeDir);
   return async ({ changeId, taskId }) => {
     const key = nextBuildKey(changeId, taskId);

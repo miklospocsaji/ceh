@@ -11,9 +11,9 @@
  * design flaw it re-plans: attempts are counted from the flaw, and the ticked tasks stay done.
  */
 import { join } from "node:path";
-import { PlanResult } from "@vocab/factory-artifacts";
-import { closeAttempt, findOpenApproval, listAttempts, listTasks, openAttempt, setWorkItemState, storePlan, type AttemptRow, type WorkItemRow } from "@vocab/factory-ledger";
-import { AttemptFailed, validatePlan, type PlanPaths, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { PlanResult } from "@ceh/factory-artifacts";
+import { closeAttempt, findOpenApproval, listAttempts, listTasks, openAttempt, setWorkItemState, storePlan, type AttemptRow, type WorkItemRow } from "@ceh/factory-ledger";
+import { AttemptFailed, validatePlan, type PlanPaths, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { NotApplicable } from "./approval.ts";
 import { changeFiles, changeFolder, currentSpecs, readComplexity, readIfExists } from "./change-files.ts";
 import { lastDesignFlawId } from "./design-flaw.ts";

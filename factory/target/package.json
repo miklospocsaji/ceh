@@ -1,0 +1,17 @@
+{
+  "name": "@ceh/factory-target",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "minimatch": "10.2.6",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  }
+}

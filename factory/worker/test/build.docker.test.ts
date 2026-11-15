@@ -1,7 +1,8 @@
 /**
- * The build container: the `build` target of the worker Dockerfile (add-build-roles task 2.11).
- * Builds the target from a temp copy of this checkout, with a dummy `.env.local` and
- * `docs/vocab.db` added, then inspects it and installs a checkout offline from its warm store.
+ * A target's build container (add-build-roles task 2.11; add-target-repositories task 8.1): the
+ * worker Dockerfile's `build-base` stage with `targets/vocab/build.Dockerfile` on top. Builds it
+ * from a temp copy of this checkout, with a dummy `.env.local` and `docs/vocab.db` added, then
+ * inspects it. The image holds no dependencies of the target's; the install is online.
  * Needs Docker; runs only through `pnpm test:docker`.
  */
 import { execFileSync, spawnSync } from "node:child_process";
@@ -10,6 +11,7 @@ import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { assembleBuildDockerfile, dockerBuildArgs } from "../src/image.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const SECRET = `dummy-secret-${randomBytes(12).toString("hex")}`;
@@ -17,7 +19,6 @@ const VOCAB_DB = `dummy-vocab-db-${randomBytes(12).toString("hex")}`;
 const IMAGE = `factory-build:test-${randomBytes(4).toString("hex")}`;
 
 let context: string;
-let archive: string;
 
 function docker(...args: string[]): string {
   return execFileSync("docker", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim();
@@ -34,16 +35,8 @@ beforeAll(() => {
   writeFileSync(join(context, ".env.local"), `CLAUDE_CODE_OAUTH_TOKEN=${SECRET}\n`);
   mkdirSync(join(context, "docs"), { recursive: true });
   writeFileSync(join(context, "docs/vocab.db"), VOCAB_DB);
-  // What a build run clones: the tree the image was built from (a clone of master in the cloud),
-  // as an archive the offline install test unpacks. Not HEAD: an uncommitted lockfile change
-  // would make the install resolve, which it cannot do offline.
-  archive = join(context, "checkout.tar");
-  const files = execFileSync("git", ["ls-files", "-co", "--exclude-standard"], { cwd: REPO_ROOT, encoding: "utf8" })
-    .split("\n")
-    .filter((file) => file !== "" && file !== "docs/vocab.db" && !file.startsWith(".env"));
-  execFileSync("tar", ["-cf", archive, "-T", "-"], { cwd: REPO_ROOT, input: files.join("\n") });
-
-  docker("build", "--platform", "linux/amd64", "--file", join(context, "factory/worker/Dockerfile"), "--target", "build", "--tag", IMAGE, context);
+  // As `pnpm image:build --target vocab` builds it: the worker Dockerfile with vocab's on top.
+  docker(...dockerBuildArgs(assembleBuildDockerfile("vocab", context), IMAGE, context));
 });
 
 afterAll(() => {
@@ -86,16 +79,37 @@ describe("factory-build image", () => {
     expect(sh("cd /app && node_modules/.bin/vitest --version")).toContain("5.0.5");
   });
 
-  it("installs a checkout offline from its warm store", () => {
-    const started = performance.now();
-    const output = sh(
-      'mkdir -p "$HOME/work" && tar -x -C "$HOME/work" -f /checkout.tar && cd "$HOME/work" && pnpm install --frozen-lockfile --offline --store-dir "$FACTORY_PNPM_STORE" && test -x node_modules/.bin/vitest && echo installed',
-      `${archive}:/checkout.tar:ro`,
-    );
-    const seconds = (performance.now() - started) / 1000;
-    expect(output).toMatch(/installed$/);
+  it("Scenario: Target image adds only its toolchain", () => {
+    const env = JSON.parse(docker("image", "inspect", "--format", "{{json .Config.Env}}", IMAGE)) as string[];
+    expect(env).toContain("FACTORY_TARGET=vocab");
+    expect(JSON.parse(docker("image", "inspect", "--format", "{{json .Config.Entrypoint}}", IMAGE))).toEqual(["node", "/app/factory/worker/src/build-main.ts"]);
+    expect(sh("id -un")).toBe("factory");
+    // The target's config is in the image, for factory-build to load.
+    expect(sh("cat /app/targets/vocab/target.yaml")).toContain("repository: miklospocsaji/vocab");
+
+    // No dependency store, warm or left over, and no node_modules but the factory's own and the tools'.
+    expect(env.some((entry) => entry.startsWith("FACTORY_PNPM_STORE="))).toBe(false);
+    expect(sh("ls -d /opt/pnpm-store /home/factory/.local/share/pnpm /home/factory/.cache/pnpm /root/.local/share/pnpm 2>/dev/null || true")).toBe("");
+    const modules = sh("find / -xdev -type d -name node_modules -prune -print 2>/dev/null || true").split("\n").filter((path) => path !== "");
+    expect(modules.filter((path) => !path.startsWith("/app/") && !path.startsWith("/usr/local/lib/") && !path.startsWith("/opt/pnpm/"))).toEqual([]);
+    // None of the target's code either: the build clones it.
+    expect(sh("ls /app")).not.toMatch(/^app$/m);
+
     const bytes = Number(docker("image", "inspect", "--format", "{{.Size}}", IMAGE));
-    // For tasks.md: the image size and the offline install time (container start included).
-    console.info(`factory-build image: ${(bytes / 1e9).toFixed(2)} GB; offline install: ${seconds.toFixed(1)} s`);
+    console.info(`vocab build image: ${(bytes / 1e9).toFixed(2)} GB`);
+  });
+
+  it("refuses an input for another target before cloning", () => {
+    // A store with one input, for a target this image is not: exit 2, naming both.
+    const store = join(context, "store-other");
+    mkdirSync(join(store, "work-items/x"), { recursive: true });
+    writeFileSync(
+      join(store, "work-items/x/input.json"),
+      JSON.stringify({ target: "other", changeId: "add-x", branch: "add-x", baseCommit: "0".repeat(40), cloneUrl: "/nowhere", task: { id: "1.1", title: "t", dependsOn: [], files: [], scenarios: [], tests: [] } }),
+    );
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "--volume", `${store}:/store:ro`, "--env", "FACTORY_STORE_DIR=/store", IMAGE, "implementer", "--input", "work-items/x/input.json"], { encoding: "utf8" });
+    expect(run.status, `${run.stdout}${run.stderr}`).toBe(2);
+    expect(run.stderr).toContain("target other");
+    expect(run.stderr).toContain("target vocab");
   });
 });

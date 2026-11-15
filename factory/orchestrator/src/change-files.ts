@@ -4,8 +4,8 @@
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { Complexity } from "@vocab/factory-artifacts";
-import type { PromptArtifact } from "@vocab/factory-roles";
+import { Complexity } from "@ceh/factory-artifacts";
+import type { PromptArtifact } from "@ceh/factory-roles";
 
 /** `openspec/changes/<id>`, relative to the worktree. */
 export const changeFolder = (changeId: string): string => `openspec/changes/${changeId}`;

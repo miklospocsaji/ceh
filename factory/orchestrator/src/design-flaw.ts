@@ -4,8 +4,8 @@
  * Design and Plan find that attempt in the ledger, so a retried task re-derives it: Design puts its
  * evidence in the architect's first prompt, and both count their attempts from it.
  */
-import { listAttempts, type AttemptRow, type Db } from "@vocab/factory-ledger";
-import type { RetryEvidence } from "@vocab/factory-roles";
+import { listAttempts, type AttemptRow, type Db } from "@ceh/factory-ledger";
+import type { RetryEvidence } from "@ceh/factory-roles";
 import { fence } from "./evidence.ts";
 
 export interface DesignFlaw {

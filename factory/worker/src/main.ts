@@ -3,7 +3,8 @@
  * point of the `factory-worker` image (ADR 0010).
  * - The command line is checked first, so invalid input exits 2 with no configuration,
  *   database or network.
- * - Configuration comes from the environment (`config.ts`). The App's private key and the
+ * - Configuration comes from the environment (`config.ts`), and the target it names
+ *   (`FACTORY_TARGET`) from `targets/` in the image. The App's private key and the
  *   ledger's secret or URL are removed from `process.env` once read, so no child process
  *   inherits them.
  * - Each connection attempt is bounded, so `runWorker`'s wait for a resuming Aurora can retry.
@@ -12,7 +13,7 @@
  * - Step Functions and the artifact bucket (`FACTORY_STORE_BUCKET`) are reached with the task
  *   role's credentials, in the task's region. The build task clones the repository over public
  *   HTTPS with no token.
- * - Roles and prompts come from the image.
+ * - Roles and prompts come from the image, resolved for the target.
  * Nothing printed contains a secret: errors from the Forge are scrubbed of tokens, and
  * configuration errors name a variable only. Exit codes are `WORKER_EXIT` in worker.ts.
  */
@@ -20,12 +21,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { appCommitter, createInstallationTokenProvider, GitHubForge } from "@vocab/factory-forge";
-import { DATABASE_URL_VAR, LEDGER_SECRET_VAR, LedgerRecorder } from "@vocab/factory-ledger";
-import { createRunner, loadRole } from "@vocab/factory-roles";
+import { appCommitter, createInstallationTokenProvider, GitHubForge } from "@ceh/factory-forge";
+import { DATABASE_URL_VAR, LEDGER_SECRET_VAR, LedgerRecorder } from "@ceh/factory-ledger";
+import { createRunner, loadRole } from "@ceh/factory-roles";
+import { cloneUrl, type Target } from "@ceh/factory-target";
 import pg from "pg";
 import { ENV, parseWorkerArgs, USAGE, WorkerConfigError, workerConfig } from "./config.ts";
-import type { TaskTokens } from "@vocab/factory-orchestrator";
+import type { TaskTokens } from "@ceh/factory-orchestrator";
 import { STORE_ENV, storeFromEnv, type ArtifactStore } from "./store.ts";
 import { runWorker, WORKER_EXIT, type WorkerRoles } from "./worker.ts";
 
@@ -47,7 +49,7 @@ async function main(argv: string[]): Promise<number> {
 
   let config;
   try {
-    config = workerConfig(process.env);
+    config = await workerConfig(process.env);
   } catch (error) {
     if (!(error instanceof WorkerConfigError)) throw error;
     err(`factory-worker: ${error.message}\n`);
@@ -79,10 +81,11 @@ async function main(argv: string[]): Promise<number> {
       db: pool,
       forge,
       runRole: createRunner({ recorder: new LedgerRecorder(pool) }),
-      role: await loadRole(PROPOSAL_AUTHOR),
-      roles: await loadRoles(),
+      target: config.target,
+      role: await loadRole(PROPOSAL_AUTHOR, config.target),
+      roles: await loadRoles(config.target),
       store,
-      cloneUrl: `https://github.com/${config.owner}/${config.repo}.git`,
+      cloneUrl: cloneUrl(config.target),
       home,
       committer,
       taskTokens: stepFunctions(),
@@ -102,9 +105,9 @@ function missingStore(): ArtifactStore {
   return { get: fail, put: fail, exists: fail };
 }
 
-async function loadRoles(): Promise<WorkerRoles> {
+async function loadRoles(target: Target): Promise<WorkerRoles> {
   const [architect, designReviewer, planner, testAuthor, implementer, classifier] = await Promise.all(
-    ["architect", "design-reviewer", "planner", "test-author", "implementer", "failure-classifier"].map((name) => loadRole(name)),
+    ["architect", "design-reviewer", "planner", "test-author", "implementer", "failure-classifier"].map((name) => loadRole(name, target)),
   );
   if (architect === undefined || designReviewer === undefined || planner === undefined || testAuthor === undefined || implementer === undefined || classifier === undefined) {
     throw new Error("a role config is missing");

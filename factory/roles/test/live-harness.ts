@@ -12,6 +12,9 @@ import { stringify } from "yaml";
 import { loadRole, type Role, type RoleConfig } from "../src/config.ts";
 import type { PromptArtifact, PromptIssue, RetryEvidence } from "../src/prompt.ts";
 import { AttemptFailed, createRunner, type QueryFn, type Recorder } from "../src/runner.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 export const LIVE_MODEL = "claude-haiku-5-5";
 export const LIVE_BUDGET_USD = 0.1;
@@ -104,7 +107,7 @@ export async function writeProbeRole(worktree: string, probe: ProbeRole): Promis
       "",
     ].join("\n"),
   );
-  return loadRole(probe.name, { root: worktree });
+  return loadRole(probe.name, TARGET, { root: worktree });
 }
 
 export interface LiveAttempt {

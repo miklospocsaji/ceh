@@ -20,6 +20,8 @@ import {
 } from "../src/queries.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 
+const REPOSITORY = "miklospocsaji/vocab";
+
 let db: TestDatabase;
 let nextIssue = 1;
 
@@ -31,7 +33,7 @@ beforeAll(async () => {
 
 async function newWorkItem(state = "plan"): Promise<string> {
   const issueNumber = nextIssue++;
-  const item = await createWorkItem(db.pool, { issueNumber, changeId: `add-build-${String(issueNumber)}`, branch: `add-build-${String(issueNumber)}`, state });
+  const item = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: `add-build-${String(issueNumber)}`, branch: `add-build-${String(issueNumber)}`, state });
   return item.id;
 }
 
@@ -218,14 +220,14 @@ describe("design flaws", () => {
     const other = await newWorkItem("build");
     const issueNumber = nextIssue - 2;
 
-    expect((await findWorkItemByIssue(db.pool, issueNumber))?.designFlaws).toBe(0);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber))?.designFlaws).toBe(0);
 
     expect(await incrementDesignFlaws(db.pool, workItemId)).toMatchObject({ id: workItemId, designFlaws: 1 });
     expect(await incrementDesignFlaws(db.pool, workItemId)).toMatchObject({ id: workItemId, designFlaws: 2 });
 
-    expect((await findWorkItemByIssue(db.pool, issueNumber))?.designFlaws).toBe(2);
-    expect((await findWorkItemByIssue(db.pool, issueNumber + 1))?.id).toBe(other);
-    expect((await findWorkItemByIssue(db.pool, issueNumber + 1))?.designFlaws).toBe(0);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber))?.designFlaws).toBe(2);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber + 1))?.id).toBe(other);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber + 1))?.designFlaws).toBe(0);
     await expect(incrementDesignFlaws(db.pool, "999999")).rejects.toThrow("999999");
   });
 });

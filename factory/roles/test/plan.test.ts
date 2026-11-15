@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PlanResult } from "@vocab/factory-artifacts";
+import type { PlanResult } from "@ceh/factory-artifacts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { validatePlan, type PlanPaths } from "../src/plan.ts";
 

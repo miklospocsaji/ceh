@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CAPABILITIES, ProposalResult, resultSchemas } from "../src/index.ts";
+import { ProposalResult, resultSchemas } from "../src/index.ts";
 
 const valid = {
   changeId: "add-vocab-import",
@@ -36,12 +36,11 @@ describe("ProposalResult", () => {
     }
   });
 
-  it("limits capabilities to the eight in ADR 0004", () => {
-    expect([...CAPABILITIES].sort()).toEqual(
-      ["auth", "enrichment", "gates", "orchestration", "practice", "roles", "trajectories", "vocab-import"],
-    );
-    expect(ProposalResult.safeParse({ ...valid, capabilities: [...CAPABILITIES] }).success).toBe(true);
-    expect(ProposalResult.safeParse({ ...valid, capabilities: ["billing"] }).success).toBe(false);
+  it("takes any kebab-case capability name, since capabilities are the target's own", () => {
+    for (const name of ["vocab-import", "billing", "auth", "a1-b2"]) expect(ProposalResult.safeParse({ ...valid, capabilities: [name] }).success, name).toBe(true);
+    for (const name of ["", "Vocab", "vocab_import", "../roles", "specs/roles", "-auth", "auth-"]) {
+      expect(ProposalResult.safeParse({ ...valid, capabilities: [name] }).success, name).toBe(false);
+    }
     expect(ProposalResult.safeParse({ ...valid, capabilities: [] }).success).toBe(false);
   });
 

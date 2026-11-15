@@ -24,7 +24,7 @@ export interface GitIdentity {
  * The author and committer of factory commits. `.invalid` can never be a real domain, so
  * GitHub never links these commits to someone's account. M2 swaps in the GitHub App's bot.
  */
-export const FACTORY_GIT_IDENTITY: GitIdentity = { name: "Vocab Factory", email: "factory@vocab.invalid" };
+export const FACTORY_GIT_IDENTITY: GitIdentity = { name: "ceh", email: "factory@ceh.invalid" };
 
 export interface EnsureWorktreeOptions {
   /** The local clone the worktree is added to; its `origin` is the remote. */

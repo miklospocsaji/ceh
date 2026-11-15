@@ -5,8 +5,8 @@
  * proposal's cost and ends by asking the owner to reply `/approve`; the local CLI's summary
  * stays as in M1. A `large` change's design gets a summary of its own, for the owner's approval.
  */
-import type { DesignResult, ProposalResult } from "@vocab/factory-artifacts";
-import type { AuthMode, TokenUsage } from "@vocab/factory-ledger";
+import type { DesignResult, ProposalResult } from "@ceh/factory-artifacts";
+import type { AuthMode, TokenUsage } from "@ceh/factory-ledger";
 
 /** What the proposal cost, over all its attempts. */
 export interface ProposalCost {
@@ -82,7 +82,7 @@ export function renderDesignSummary(input: DesignSummaryInput): string {
     result.summary,
     [`- **Change id:** \`${changeId}\``, `- **Branch:** \`${branch}\``, `- **Cost:** ${costLine(cost)}`].join("\n"),
     "### Contracts",
-    list(result.contracts, "No changes in `app/contracts/`.", true),
+    list(result.contracts, "No contract changes.", true),
     "### Decisions that need an ADR",
     list(result.adrNeeded, "None."),
     "### Open questions",

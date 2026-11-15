@@ -4,12 +4,15 @@
  * assertion in the task's own test, while the implementation ignores case. The session's turn
  * count is printed so `maxTurns` in failure-classifier.yaml can be set from it (task 2.8).
  */
-import { ClassificationResult, type GatesResult } from "@vocab/factory-artifacts";
+import { ClassificationResult, type GatesResult } from "@ceh/factory-artifacts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { renderClassifierPrompt } from "../src/classifier.ts";
 import { loadRole, type Role } from "../src/config.ts";
 import { createCostLog, makeWorktree, outcomeOf, removeDir, runProbe, toolCalls, type LiveAttempt } from "./live-harness.ts";
 import { apiKeyEnv, capped, CHANGE_ID, LIVE_CAP_USD, report, SCENARIOS } from "./live-change.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 const TEST_FILE = "app/domain/test/lookup-counts.test.ts";
 const OUTPUT = `FAIL  ${TEST_FILE} > Scenario: Words differing only in case are counted together
@@ -57,7 +60,7 @@ const costs = createCostLog();
 beforeAll(async () => {
   const env = apiKeyEnv();
   worktree = makeWorktree();
-  role = capped(await loadRole("failure-classifier"));
+  role = capped(await loadRole("failure-classifier", TARGET));
   const prompt = renderClassifierPrompt({
     changeId: CHANGE_ID,
     task: { id: "1.1", title: "Count lookups per word", scenarios: SCENARIOS },

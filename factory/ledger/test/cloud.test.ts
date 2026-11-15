@@ -19,6 +19,8 @@ import {
 } from "../src/queries.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 
+const REPOSITORY = "miklospocsaji/vocab";
+
 const OWNER = "miklospocsaji";
 const ARN = "arn:aws:states:eu-central-1:123456789012:execution:factory-work-item:issue-12-4f0c";
 const TOKEN = "AQB8AAAAKgAAAAMAAAAAAAAAAQ-task-token";
@@ -36,6 +38,7 @@ async function newWorkItem(executionArn?: string): Promise<{ id: string; issueNu
   const issueNumber = nextIssue++;
   const changeId = `add-item-${String(issueNumber)}`;
   const item = await createWorkItem(db.pool, {
+    repository: REPOSITORY,
     issueNumber,
     changeId,
     branch: changeId,
@@ -49,20 +52,20 @@ describe("work items in the cloud", () => {
   it("keeps the issue number unique", async () => {
     const { issueNumber } = await newWorkItem();
 
-    const second = createWorkItem(db.pool, { issueNumber, changeId: "add-other-name", branch: "add-other-name", state: "intake" });
+    const second = createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: "add-other-name", branch: "add-other-name", state: "intake" });
 
     await expect(second).rejects.toThrow(IssueHasWorkItem);
     await expect(second).rejects.toThrow(`#${String(issueNumber)}`);
-    expect((await findWorkItemByIssue(db.pool, issueNumber))?.changeId).toBe(`add-item-${String(issueNumber)}`);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber))?.changeId).toBe(`add-item-${String(issueNumber)}`);
   });
 
   it("records the execution ARN on the work item", async () => {
     const { issueNumber } = await newWorkItem(ARN);
-    expect(await findWorkItemByIssue(db.pool, issueNumber)).toMatchObject({ executionArn: ARN });
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, issueNumber)).toMatchObject({ executionArn: ARN });
 
     // A local run has no execution.
     const local = await newWorkItem();
-    expect(await findWorkItemByIssue(db.pool, local.issueNumber)).toMatchObject({ executionArn: null });
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, local.issueNumber)).toMatchObject({ executionArn: null });
   });
 });
 

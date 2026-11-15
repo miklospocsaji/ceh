@@ -4,13 +4,15 @@
 // fake gates and install, a temp git remote and an FsStore.
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { BuildOutcome, GatesResult, ImplementationResult, TestResult } from "@vocab/factory-artifacts";
-import type { RunGatesOptions } from "@vocab/factory-gates";
-import { AttemptFailed, type Recorder, type Role, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { BuildOutcome, GatesResult, ImplementationResult, TestResult } from "@ceh/factory-artifacts";
+import type { RunGatesOptions } from "@ceh/factory-gates";
+import { AttemptFailed, type Recorder, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
+import { TargetConfigError, type Target } from "@ceh/factory-target";
+import { testTarget } from "@ceh/factory-target/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BUILD_EXIT, FACTORY_CREDENTIALS, runBuild, type BuildDeps, type BuildInput } from "../src/build.ts";
 import { FsStore, type ArtifactStore } from "../src/store.ts";
@@ -52,6 +54,8 @@ const ROLES: Record<string, Role> = {
   "proposal-author": role("proposal-author", { runsIn: "worker", tools: ["Read"], allow: ["Read"] }),
 };
 
+const TARGET = testTarget();
+
 let work: string;
 let remote: string;
 let base: string;
@@ -80,6 +84,9 @@ interface Fake {
   sessions: { role: Role; item: WorkItem; head: string }[];
   gates: RunGatesOptions[];
   installs: string[];
+  installCommands: string[];
+  /** The target each role was loaded for. */
+  roleTargets: string[];
   out: string[];
   err: string[];
   reads: string[];
@@ -92,6 +99,10 @@ interface FakeOptions {
   /** The session's outcome: its result, or an error to throw. */
   outcome?: unknown;
   gatesPass?: boolean;
+  /** The target the image holds; defaults to the test target. */
+  target?: Target;
+  /** Run the real install, the target's command, in place of the recording one. */
+  realInstall?: boolean;
   /** Replaces the patch step, to make it fail. */
   makePatch?: BuildDeps["makePatch"];
 }
@@ -101,6 +112,8 @@ function fake(options: FakeOptions = {}): Fake {
   const sessions: Fake["sessions"] = [];
   const gates: Fake["gates"] = [];
   const installs: string[] = [];
+  const installCommands: string[] = [];
+  const roleTargets: string[] = [];
   const out: string[] = [];
   const err: string[] = [];
   const reads: string[] = [];
@@ -128,14 +141,21 @@ function fake(options: FakeOptions = {}): Fake {
     store: counting,
     home,
     createRunRole,
-    loadRole: (name) => {
+    loadTarget: (name) => (name === TARGET.name ? Promise.resolve(options.target ?? TARGET) : Promise.reject(new TargetConfigError(name, "config", `targets/${name}/target.yaml is missing`))),
+    loadRole: (name, target) => {
+      roleTargets.push(target.name);
       const found = ROLES[name];
       return found === undefined ? Promise.reject(new Error(`no role ${name}`)) : Promise.resolve(found);
     },
-    install: (worktree) => {
-      installs.push(worktree);
-      return Promise.resolve();
-    },
+    ...(options.realInstall === true
+      ? {}
+      : {
+          install: (worktree: string, command: string) => {
+            installs.push(worktree);
+            installCommands.push(command);
+            return Promise.resolve();
+          },
+        }),
     runGates: (gateOptions) => {
       gates.push(gateOptions);
       return Promise.resolve({ mode: gateOptions.mode, changeId: gateOptions.changeId, taskId: gateOptions.task.id, passed: options.gatesPass ?? true, checks: [] });
@@ -144,11 +164,12 @@ function fake(options: FakeOptions = {}): Fake {
     out: (text) => out.push(text),
     err: (text) => err.push(text),
   };
-  return { deps, runners, sessions, gates, installs, out, err, reads };
+  return { deps, runners, sessions, gates, installs, installCommands, roleTargets, out, err, reads };
 }
 
 function input(overrides: Partial<BuildInput> = {}): BuildInput {
   return {
+    target: "vocab",
     changeId: CHANGE_ID,
     branch: CHANGE_ID,
     baseCommit: base,
@@ -202,6 +223,64 @@ afterEach(() => {
 });
 
 describe("factory-build", () => {
+  it("Scenario: Input for another target is refused", async () => {
+    const result = await build("implementer", { env: { FACTORY_CONTAINER: "build", FACTORY_TARGET: "vocab", CLAUDE_CODE_OAUTH_TOKEN: TOKEN, HOME: home } }, input({ target: "other" }));
+
+    expect(result.code).toBe(BUILD_EXIT.invalid);
+    expect(result.err.join("")).toContain("target other");
+    expect(result.err.join("")).toContain("target vocab");
+    // Before cloning, installing or starting a session.
+    expect(existsSync(join(home, "work"))).toBe(false);
+    expect(result.installs).toEqual([]);
+    expect(result.runners).toEqual([]);
+    expect(await store.exists(`${PREFIX("implementer")}/outcome.json`)).toBe(false);
+  });
+
+  it("refuses an input with no target, or one the image does not hold", async () => {
+    const without: Record<string, unknown> = { ...input() };
+    delete without["target"];
+    expect((await build("implementer", {}, without)).code).toBe(BUILD_EXIT.invalid);
+    const unknown = await build("implementer", {}, input({ target: "nosuch" }));
+    expect(unknown.code).toBe(BUILD_EXIT.invalid);
+    expect(unknown.err.join("")).toContain("nosuch");
+    expect(existsSync(join(home, "work"))).toBe(false);
+  });
+
+  it("Scenario: Install runs before the session", async () => {
+    // A stand-in pnpm, first on PATH, that records how it was called and what it could see.
+    const bin = join(home, "..", "fake-bin");
+    const record = join(home, "..", "install.json");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "pnpm"), `#!/bin/sh\nnode -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), env: process.env }))' ${record} "$@"\n`);
+    chmodSync(join(bin, "pnpm"), 0o755);
+    let installedBeforeSession = false;
+
+    const result = await build("test-author", {
+      realInstall: true,
+      env: { FACTORY_CONTAINER: "build", FACTORY_TARGET: "vocab", CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: `key-${TOKEN}`, HOME: home, PATH: `${bin}:${process.env["PATH"] ?? ""}` },
+      act: (worktree) => {
+        installedBeforeSession = existsSync(record);
+        write(worktree, STUB, "export {};\n");
+        write(worktree, TEST, 'it("Scenario: Words are counted", () => { throw new Error("red"); });\n');
+      },
+    });
+
+    expect(result.code).toBe(BUILD_EXIT.ok);
+    expect(installedBeforeSession).toBe(true);
+    const ran = JSON.parse(readFileSync(record, "utf8")) as { args: string[]; cwd: string; env: Record<string, string> };
+    expect(ran.args).toEqual(["install", "--frozen-lockfile"]);
+    expect(ran.cwd).toBe(join(home, "work"));
+    // No credential of any kind: neither the model's nor the factory's.
+    for (const name of Object.keys(ran.env)) expect(name).not.toMatch(/^(ANTHROPIC_|CLAUDE_|FACTORY_|GH_|GITHUB_|AWS_)/);
+    expect(JSON.stringify(ran.env)).not.toContain(TOKEN);
+
+    const written = await outcome("test-author");
+    expect(written.outcome).toBe("passed");
+    expect(written.installMs).toEqual(expect.any(Number));
+    expect(written.installMs).toBeGreaterThanOrEqual(0);
+    expect(result.out.join("")).toContain("install: `pnpm install --frozen-lockfile` took");
+  });
+
   it.each(["FACTORY_GITHUB_APP_PRIVATE_KEY", "FACTORY_LEDGER_SECRET"])("Scenario: Build container refuses factory credentials (%s)", async (name) => {
     const value = `secret-value-${randomUUID()}`;
     const result = await build("implementer", { env: { FACTORY_CONTAINER: "build", CLAUDE_CODE_OAUTH_TOKEN: TOKEN, HOME: home, [name]: value } });
@@ -249,6 +328,10 @@ describe("factory-build", () => {
       task: { id: "1.1", scenarios: ["Words are counted"], coveredSoFar: ["Words are counted"] },
     });
     expect(result.gates[0]?.secrets).toContain(TOKEN);
+    // The gates run the target's commands, and the role was loaded for the target.
+    expect(result.gates[0]).toMatchObject({ commands: { typecheck: "pnpm typecheck", lint: "pnpm lint", unit: "pnpm exec vitest run", unitTestPath: "app/" }, coverageTestsDir: "app" });
+    expect(result.roleTargets).toEqual(["vocab"]);
+    expect(result.installCommands).toEqual(["pnpm install --frozen-lockfile"]);
 
     expect(await outcome("implementer")).toEqual({
       role: "implementer",
@@ -259,6 +342,7 @@ describe("factory-build", () => {
       patch: `${PREFIX("implementer")}/patch.diff`,
       messages: `${PREFIX("implementer")}/messages.jsonl`,
       baseCommit: base,
+      installMs: expect.any(Number) as number,
     });
     expect(GatesResult.parse(JSON.parse(await store.get(`${PREFIX("implementer")}/gates.json`)))).toMatchObject({ mode: "green", passed: true });
     expect([...result.out, ...result.err].join("")).not.toContain(TOKEN);
@@ -396,6 +480,7 @@ describe("factory-build", () => {
       patch: `${rerun}/patch.diff`,
       messages: `${rerun}/messages.jsonl`,
       baseCommit: base,
+      installMs: expect.any(Number) as number,
     });
     expect(await store.get(`${rerun}/patch.diff`)).toBe(await store.get(patchKey));
     expect(await store.get(`${rerun}/messages.jsonl`)).toBe("");

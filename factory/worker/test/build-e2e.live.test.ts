@@ -1,10 +1,12 @@
 /**
  * End to end in Docker (add-build-roles task 2.15, step M3.2's exit): one task of the fixture
- * change `add-lookup-counts`, through `factory-build` in the worker image's `build` target and an
+ * change `add-lookup-counts`, through `factory-build` in vocab's build image and an
  * `FsStore` mounted at `/store`. The test author's outcome must pass the red gate, then, with its
  * patch committed as the worker's Record step would, the implementer's must pass the green gate.
  *
- * The remote is a bare clone of this repository at HEAD plus the fixture change. Git in the
+ * The remote is a bare clone of the target's repository (`miklospocsaji/vocab`, cloned from
+ * GitHub with no token) at its default branch, plus the fixture change. The build installs the
+ * clone's dependencies online, and each outcome's install time is printed. Git in the
  * container refuses a repository owned by another user, so the container copies it to its own
  * `/tmp` and then execs the real entry point; in the cloud the clone URL is GitHub's.
  *
@@ -17,9 +19,10 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { BuildOutcome, GatesResult } from "@vocab/factory-artifacts";
-import { redact } from "@vocab/factory-gates";
+import { BuildOutcome, GatesResult } from "@ceh/factory-artifacts";
+import { redact } from "@ceh/factory-gates";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { assembleBuildDockerfile, dockerBuildArgs } from "../src/image.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const FIXTURE = join(REPO_ROOT, "factory/roles/test/fixtures/add-lookup-counts");
@@ -66,7 +69,7 @@ function put(root: string, path: string, content: string): void {
 /** One `factory-build <role> --input <key>` run in the build image, as a local run starts it. */
 function factoryBuild(role: string, baseCommit: string, attempt: string): RoleRun {
   const prefix = `work-items/${CHANGE_ID}/tasks/${TASK.id}/${role}/${attempt}`;
-  put(store, `${prefix}/input.json`, `${JSON.stringify({ changeId: CHANGE_ID, branch: CHANGE_ID, baseCommit, cloneUrl: "/tmp/remote.git", task: TASK, coveredSoFar: SCENARIOS }, null, 2)}\n`);
+  put(store, `${prefix}/input.json`, `${JSON.stringify({ target: "vocab", changeId: CHANGE_ID, branch: CHANGE_ID, baseCommit, cloneUrl: "/tmp/remote.git", task: TASK, coveredSoFar: SCENARIOS }, null, 2)}\n`);
   // The container's factory user (uid 10001) writes its outputs next to the input.
   for (let dir = prefix; dir !== "."; dir = dirname(dir)) chmodSync(join(store, dir), 0o777);
 
@@ -112,7 +115,7 @@ function factoryBuild(role: string, baseCommit: string, attempt: string): RoleRu
   const result = messages.findLast((message) => message.type === "result");
   const roleRun = { status: run.status, output, wallMs, outcome, gates, costUsd: result?.total_cost_usd ?? 0, turns: result?.num_turns };
   console.log(
-    `${role}: ${outcome.outcome}${outcome.reason === undefined ? "" : ` (${outcome.reason})`}, $${roleRun.costUsd.toFixed(4)}, ${String(roleRun.turns ?? "?")} turns, ${String(wallMs)} ms wall\n` +
+    `${role}: ${outcome.outcome}${outcome.reason === undefined ? "" : ` (${outcome.reason})`}, $${roleRun.costUsd.toFixed(4)}, ${String(roleRun.turns ?? "?")} turns, ${String(wallMs)} ms wall, install ${String(outcome.installMs ?? "?")} ms\n` +
       `gates: ${JSON.stringify(gates?.checks.map((check) => [check.name, check.passed]))}\n` +
       `roleResult: ${JSON.stringify(outcome.roleResult, null, 2)}\n--- patch\n${read(outcome.patch)}`,
   );
@@ -137,8 +140,8 @@ beforeAll(() => {
   remote = join(parent, "remote.git");
   store = join(parent, "store");
 
-  // This repository at HEAD, plus the fixture change with its design and one-task plan.
-  git(REPO_ROOT, "clone", "--quiet", "--no-local", REPO_ROOT, work);
+  // The target's repository at its default branch, plus the fixture change with its design and one-task plan.
+  git(parent, "clone", "--quiet", "https://github.com/miklospocsaji/vocab.git", work);
   git(work, "checkout", "--quiet", "-b", CHANGE_ID);
   for (const path of ["proposal.md", "specs/vocab-import/spec.md", ".openspec.yaml"]) {
     mkdirSync(dirname(join(work, CHANGE, path)), { recursive: true });
@@ -156,7 +159,7 @@ beforeAll(() => {
   mkdirSync(store);
   chmodSync(store, 0o777);
 
-  execFileSync("docker", ["build", "--platform", "linux/amd64", "--file", "factory/worker/Dockerfile", "--target", "build", "--tag", BUILD_IMAGE, "."], {
+  execFileSync("docker", dockerBuildArgs(assembleBuildDockerfile("vocab"), BUILD_IMAGE), {
     cwd: REPO_ROOT,
     stdio: ["ignore", "ignore", "inherit"],
   });
@@ -182,7 +185,7 @@ describe("end to end in the build container", () => {
   it("the test author's outcome passes the red gate, then the implementer's passes the green gate", { timeout: 2_400_000 }, () => {
     const red = factoryBuild("test-author", base, "1");
     expect(red.status, red.output).toBe(0);
-    expect(red.output).not.toContain("online-install");
+    expect(red.outcome.installMs).toEqual(expect.any(Number));
     expect(red.outcome).toMatchObject({ role: "test-author", outcome: "passed", baseCommit: base, diffCheck: { passed: true, outside: [] } });
     expect(red.gates).toMatchObject({ mode: "red", passed: true });
 

@@ -15,14 +15,14 @@ const report: VitestFile[] = [
 
 describe("coverage", () => {
   it("Scenario: Scenario without a test fails coverage", async () => {
-    const result = await checkCoverage({ worktree, changeId });
+    const result = await checkCoverage({ worktree, changeId, testsDir: "app" });
     expect(result.passed).toBe(false);
     expect(result.missing).toContain("Re-import adds only new lookups");
   });
 
   it("Scenario: Coverage checks only the given scenarios", async () => {
     const scenarios = ["Import reads every book", "New words are due at once"];
-    expect(await checkCoverage({ worktree, changeId, scenarios })).toEqual({ passed: true, missing: [] });
+    expect(await checkCoverage({ worktree, changeId, scenarios, testsDir: "app" })).toEqual({ passed: true, missing: [] });
     expect(await checkCoverage({ worktree, changeId, scenarios, report })).toEqual({ passed: true, missing: [] });
   });
 
@@ -47,7 +47,7 @@ describe("coverage", () => {
   });
 
   it("scans app/ for quoted scenario names in any quote style when there is no report", async () => {
-    expect((await testNames(worktree)).sort()).toEqual([
+    expect((await testNames(worktree, { testsDir: "app/" })).sort()).toEqual([
       "Scenario: Import keeps the lookup's sentence",
       "Scenario: Import reads every book",
       "Scenario: New words are due at once",

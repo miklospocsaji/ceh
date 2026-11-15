@@ -1,17 +1,19 @@
 /**
- * `factory-build <role> --input <key>`: the build container's entry point, the `build` target of
+ * `factory-build <role> --input <key>`: the build container's entry point in a target's build image, built on
  * the worker image (ADR 0010, ADR 0011), with its real dependencies.
  * - The store is the directory `FACTORY_STORE_DIR` (local runs mount it at `/store`), otherwise
  *   the bucket `FACTORY_STORE_BUCKET`, reached with the task role's credentials (`storeFromEnv`).
  * - The runner is the role runner with the process environment, from which it passes a session
  *   only its allowlist and the model credential.
+ * - The target and the roles come from the image; the target is the one the input names.
  * - The clone lives in a temp home, removed at the end.
  * Exit codes are `BUILD_EXIT` in build.ts.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRunner, loadRole } from "@vocab/factory-roles";
+import { createRunner, loadRole } from "@ceh/factory-roles";
+import { loadTarget } from "@ceh/factory-target";
 import { BUILD_EXIT, credentialRefusal, runBuild } from "./build.ts";
 import { STORE_ENV, storeFromEnv } from "./store.ts";
 
@@ -37,7 +39,8 @@ async function main(argv: string[]): Promise<number> {
       store,
       home,
       createRunRole: ({ recorder, container }) => createRunner({ recorder, container, env: process.env }),
-      loadRole: (name) => loadRole(name),
+      loadTarget: (name) => loadTarget(name),
+      loadRole: (name, target) => loadRole(name, target),
       out,
       err,
     });

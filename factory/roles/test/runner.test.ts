@@ -15,7 +15,7 @@ import type {
   SDKSessionStateChangedMessage,
   SDKSystemMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { ProposalResult } from "@vocab/factory-artifacts";
+import { ProposalResult } from "@ceh/factory-artifacts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RoleConfigError, type Role } from "../src/config.ts";
 import { renderPrompt, type RetryEvidence } from "../src/prompt.ts";
@@ -378,11 +378,8 @@ describe("runRole", () => {
         required: ["changeId", "capabilities", "complexity", "summary", "openQuestions"],
         properties: {
           changeId: { type: "string", pattern: "^[a-z][a-z0-9]*(-[a-z0-9]+)+$" },
-          capabilities: { type: "array", minItems: 1, items: {
-              type: "string",
-              enum: ["vocab-import", "trajectories", "enrichment", "practice", "auth", "orchestration", "roles", "gates"],
-            },
-          },
+          // Any kebab-case name: which capabilities exist is the target's own decision (ADR 0014).
+          capabilities: { type: "array", minItems: 1, items: { type: "string", pattern: "^[a-z][a-z0-9]*(-[a-z0-9]+)*$" } },
           complexity: { type: "string", enum: ["small", "medium", "large"] },
           summary: { type: "string", minLength: 1 },
           openQuestions: { type: "array", items: { type: "string" } },

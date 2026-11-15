@@ -1,12 +1,14 @@
 // The build container records a session to messages.jsonl; the worker replays it into the ledger
 // (add-build-roles task 2.10). The replay must give the rows a live recording gives.
-import { JsonlRecorder, replayMessages } from "@vocab/factory-roles";
+import { JsonlRecorder, replayMessages } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { migrate } from "../src/migrate.ts";
 import { createWorkItem, listAttempts, listMessages, openAttempt } from "../src/queries.ts";
 import { LedgerRecorder } from "../src/recorder.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 import { assistant, init, result } from "./messages.ts";
+
+const REPOSITORY = "miklospocsaji/vocab";
 
 const ROLE = "implementer";
 
@@ -21,7 +23,7 @@ beforeAll(async () => {
 
 async function openItem(): Promise<{ workItemId: string; attemptId: string }> {
   const issueNumber = nextIssue++;
-  const row = await createWorkItem(db.pool, { issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "build" });
+  const row = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "build" });
   const attempt = await openAttempt(db.pool, { workItemId: row.id, state: "build", role: ROLE });
   return { workItemId: row.id, attemptId: attempt.id };
 }

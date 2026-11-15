@@ -1,16 +1,17 @@
 {
-  "name": "@vocab/factory-cli",
+  "name": "@ceh/factory-cli",
   "private": true,
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@vocab/factory-forge": "workspace:*",
-    "@vocab/factory-ledger": "workspace:*",
-    "@vocab/factory-orchestrator": "workspace:*",
-    "@vocab/factory-roles": "workspace:*",
-    "@vocab/factory-worker": "workspace:*",
+    "@ceh/factory-forge": "workspace:*",
+    "@ceh/factory-ledger": "workspace:*",
+    "@ceh/factory-orchestrator": "workspace:*",
+    "@ceh/factory-roles": "workspace:*",
+    "@ceh/factory-target": "workspace:*",
+    "@ceh/factory-worker": "workspace:*",
     "pg": "8.23.1"
   },
   "devDependencies": {

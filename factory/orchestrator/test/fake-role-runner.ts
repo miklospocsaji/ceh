@@ -13,7 +13,7 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { AttemptFailed, type Recorder, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { AttemptFailed, type Recorder, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { init, result } from "../../ledger/test/messages.ts";
 
 const run = promisify(execFile);

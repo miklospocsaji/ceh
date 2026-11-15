@@ -5,11 +5,14 @@
  * the exact word. The expected verdict is `changes-requested`. The findings, the turns and the
  * cost are printed for the task's record.
  */
-import { ReviewResult } from "@vocab/factory-artifacts";
+import { ReviewResult } from "@ceh/factory-artifacts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadRole, type Role } from "../src/config.ts";
 import { createCostLog, outcomeOf, runProbe, toolCalls, type LiveAttempt } from "./live-harness.ts";
 import { apiKeyEnv, capped, CHANGE_ID, ISSUE, LIVE_CAP_USD, makeChangeRepo, report, type ChangeRepo } from "./live-change.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 let repo: ChangeRepo;
 let role: Role;
@@ -19,7 +22,7 @@ const costs = createCostLog();
 beforeAll(async () => {
   const env = apiKeyEnv();
   repo = makeChangeRepo("design-contradiction.md");
-  role = capped(await loadRole("design-reviewer"));
+  role = capped(await loadRole("design-reviewer", TARGET));
   attempt = await runProbe(role, repo.root, { env, changeId: CHANGE_ID, issue: ISSUE, changeFiles: repo.changeFiles(), specs: repo.specs() });
   costs.track("design-reviewer (planted contradiction)", attempt);
   report("design-reviewer", attempt);

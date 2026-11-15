@@ -112,6 +112,8 @@ export const BuildOutcome = z
     messages: text,
     /** The commit the session started from, given in the input, never read from the clone. */
     baseCommit: z.string().regex(/^[0-9a-f]{40}$/, "a full commit SHA"),
+    /** How long the target's install command took in the clone, before the session. */
+    installMs: z.int().nonnegative().optional(),
   })
   .superRefine((outcome, ctx) => {
     if (outcome.outcome === "failed") {

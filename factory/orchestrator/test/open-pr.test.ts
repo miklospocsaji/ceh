@@ -1,9 +1,13 @@
 // Open PR (add-build-loop task 3.9): one pull request for the change branch once every task is ticked.
-import { listTasks } from "@vocab/factory-ledger";
+import { execFileSync } from "node:child_process";
+import { listTasks } from "@ceh/factory-ledger";
 import { describe, expect, it } from "vitest";
 import { openPr } from "../src/open-pr.ts";
 import { buildTask, CODE, codeFor, currentWorkItem, TESTS, testsFor, useBuildHarness } from "./build-harness.ts";
 import { CHANGE_ID, ISSUE, plannedWorkItem, useWorkItemFixture } from "./work-item-fixture.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 const f = useWorkItemFixture("open_pr");
 const builds = useBuildHarness(f);
@@ -17,8 +21,8 @@ describe("open-pr", { timeout: 60_000 }, () => {
     expect((await listTasks(f.db.pool, workItem.id)).map((task) => task.status)).toEqual(["done", "done"]);
     const comments = f.forge.comments.length;
 
-    const first = await openPr({ db: f.db.pool, forge: f.forge }, await currentWorkItem(f));
-    const second = await openPr({ db: f.db.pool, forge: f.forge }, await currentWorkItem(f));
+    const first = await openPr({ db: f.db.pool, forge: f.forge, target: TARGET }, await currentWorkItem(f));
+    const second = await openPr({ db: f.db.pool, forge: f.forge, target: TARGET }, await currentWorkItem(f));
 
     expect(first).toMatchObject({ kind: "advance", workItem: { state: "pr-open" } });
     expect(second).toMatchObject({ kind: "advance", workItem: { state: "pr-open" } });
@@ -45,6 +49,21 @@ describe("open-pr", { timeout: 60_000 }, () => {
     expect(f.forge.comments.at(-1)).toMatchObject({ issueNumber: ISSUE.number, body: expect.stringContaining(pr?.url ?? "no url") as unknown });
   });
 
+  it("Scenario: Pull request targets the default branch", async () => {
+    await plannedWorkItem(f);
+    const h = builds.create([TESTS, CODE, testsFor("app/domain/test/books.test.ts", "app/domain/src/books.ts", "Books are imported"), codeFor("app/domain/src/books.ts")]);
+    await buildTask(f, h, "1.1");
+    await buildTask(f, h, "1.2");
+
+    // A repository whose default branch is not master.
+    execFileSync("git", ["branch", "main", "master"], { cwd: f.remote });
+
+    await openPr({ db: f.db.pool, forge: f.forge, target: testTarget({ defaultBranch: "main" }) }, await currentWorkItem(f));
+
+    expect(f.forge.pullRequests).toHaveLength(1);
+    expect(f.forge.pullRequests[0]).toMatchObject({ head: CHANGE_ID, base: "main" });
+  });
+
   it("Scenario: Pull request says what its cost means", async () => {
     // Every attempt in api-key mode: the cost was charged to the factory's API key.
     const body = await prBodyWithAuthMode("api-key");
@@ -61,7 +80,7 @@ describe("open-pr", { timeout: 60_000 }, () => {
   it("refuses a work item whose tasks are not all done", async () => {
     await plannedWorkItem(f);
 
-    await expect(openPr({ db: f.db.pool, forge: f.forge }, await currentWorkItem(f))).rejects.toThrow(/1\.1/);
+    await expect(openPr({ db: f.db.pool, forge: f.forge, target: TARGET }, await currentWorkItem(f))).rejects.toThrow(/1\.1/);
     expect(f.forge.pullRequests).toEqual([]);
   });
 });
@@ -74,6 +93,6 @@ async function prBodyWithAuthMode(mode: "api-key" | "subscription"): Promise<str
   expect((await buildTask(f, h, "1.2")).at(-1)?.kind).toBe("done");
   await f.db.pool.query("UPDATE attempts SET auth_mode = $2 WHERE work_item_id = $1", [workItem.id, mode]);
 
-  await openPr({ db: f.db.pool, forge: f.forge }, await currentWorkItem(f));
+  await openPr({ db: f.db.pool, forge: f.forge, target: TARGET }, await currentWorkItem(f));
   return f.forge.pullRequests.at(-1)?.body ?? "";
 }

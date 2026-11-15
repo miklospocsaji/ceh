@@ -1,6 +1,6 @@
 /**
- * The Bash boundaries inside the build container (add-build-roles task 2.14). Builds the worker
- * image's `build` target and runs `build-image.container.test.ts` in it, in a container started
+ * The Bash boundaries inside the build container (add-build-roles task 2.14). Builds vocab's
+ * build image and runs `build-image.container.test.ts` in it, in a container started
  * with no added capabilities and Docker's default seccomp profile, in api-key mode. The container
  * gets the API key, and also the OAuth token and decoy factory and AWS credentials, so the test
  * can show that a session sees only the effective mode's credential. Values reach the container
@@ -10,8 +10,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { redact } from "@vocab/factory-gates";
+import { redact } from "@ceh/factory-gates";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { assembleBuildDockerfile, dockerBuildArgs } from "../src/image.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const BUILD_IMAGE = `factory-worker-build:live-${randomBytes(4).toString("hex")}`;
@@ -64,7 +65,7 @@ function vitestInBuildImage(...args: string[]): { status: number | null; output:
 
 beforeAll(() => {
   for (const name of MODEL_CREDENTIALS) expect(process.env[name], `${name} must be set (in .env.local)`).toBeTruthy();
-  execFileSync("docker", ["build", "--platform", "linux/amd64", "--file", "factory/worker/Dockerfile", "--target", "build", "--tag", BUILD_IMAGE, "."], {
+  execFileSync("docker", dockerBuildArgs(assembleBuildDockerfile("vocab"), BUILD_IMAGE), {
     cwd: REPO_ROOT,
     stdio: ["ignore", "ignore", "inherit"],
   });

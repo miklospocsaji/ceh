@@ -6,8 +6,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findWorkItemByIssue, LedgerRecorder, type WorkItemRow } from "@vocab/factory-ledger";
-import { loadRole, type Role } from "@vocab/factory-roles";
+import { findWorkItemByIssue, LedgerRecorder, type WorkItemRow } from "@ceh/factory-ledger";
+import { loadRole, type Role } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach } from "vitest";
 import { FsStore } from "../../worker/src/store.ts";
 import type { ArtifactStore } from "../src/build-io.ts";
@@ -15,6 +15,11 @@ import { step, type StepContext, type StepResult } from "../src/step.ts";
 import { createFakeBuildRunner, type FakeBuildRunner, type FakeBuildStep } from "./fake-build-runner.ts";
 import { createFakeRoleRunner, type FakeCall, type FakeStep } from "./fake-role-runner.ts";
 import { BOT, CHANGE_ID, ISSUE, type Fixture } from "./work-item-fixture.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 export const TEST_FILE = "app/domain/test/lookups.test.ts";
 export const SOURCE = "app/domain/src/lookups.ts";
@@ -56,9 +61,9 @@ export function useBuildHarness(f: Fixture): BuildHarness {
   let store: ArtifactStore;
 
   beforeAll(async () => {
-    classifier = await loadRole("failure-classifier");
-    testAuthor = await loadRole("test-author");
-    implementer = await loadRole("implementer");
+    classifier = await loadRole("failure-classifier", TARGET);
+    testAuthor = await loadRole("test-author", TARGET);
+    implementer = await loadRole("implementer", TARGET);
   });
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "factory-build-store-"));
@@ -74,6 +79,7 @@ export function useBuildHarness(f: Fixture): BuildHarness {
       const fake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), classifications);
       const ctx: StepContext = {
         db: f.db.pool,
+        target: TARGET,
         forge: f.forge,
         runRole: fake.runRole,
         classifier,
@@ -92,7 +98,7 @@ export function useBuildHarness(f: Fixture): BuildHarness {
 }
 
 export async function currentWorkItem(f: Fixture): Promise<WorkItemRow> {
-  const workItem = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+  const workItem = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
   if (workItem === undefined) throw new Error("no work item");
   return workItem;
 }

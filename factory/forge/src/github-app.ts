@@ -130,7 +130,7 @@ function messageOf(error: unknown): string {
 }
 
 export interface AppCommitterOptions {
-  /** The App's slug, such as `vocab-factory`. */
+  /** The App's slug, such as `ceh-app`. */
   slug: string;
   /** Authenticates the lookup; an installation token provider in the worker. */
   token?: TokenProvider;

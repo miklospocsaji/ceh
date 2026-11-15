@@ -3,8 +3,9 @@
 # allowlist in Dockerfile.dockerignore. Run: factory-worker <state> --issue <n>.
 #   docker build --platform linux/amd64 -f factory/worker/Dockerfile -t factory-worker .
 # The default build is the worker. `--target boundary-check` builds the test-only check image
-# on top of it (ADR 0010, amendment of 2026-11-06). `--target build` builds the build container,
-# which runs the roles with Bash (ADR 0011; ADR 0010, amendment of 2026-11-09).
+# on top of it (ADR 0010, amendment of 2026-11-06). `build-base` is what each target's build
+# container, which runs the roles with Bash, starts from (ADR 0011; ADR 0010, amendments of
+# 2026-11-09 and add-target-repositories).
 
 # Moving the digest is a deliberate change (ADR 0010).
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
@@ -17,7 +18,7 @@ RUN npm install --global --ignore-scripts --prefix /opt/pnpm pnpm@12.15.0
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY factory/ factory/
-RUN /opt/pnpm/bin/pnpm install --frozen-lockfile --prod --filter "@vocab/factory-worker..." --filter "vocab" \
+RUN /opt/pnpm/bin/pnpm install --frozen-lockfile --prod --filter "@ceh/factory-worker..." --filter "ceh" \
  && rm -rf /root/.cache /root/.local/share/pnpm /root/.npm
 COPY . .
 
@@ -52,34 +53,30 @@ ENTRYPOINT ["node", "/app/factory/worker/src/main.ts"]
 FROM worker AS boundary-check
 USER root
 RUN npm install --global --ignore-scripts --prefix /opt/pnpm pnpm@12.15.0 \
- && cd /app && CI=true /opt/pnpm/bin/pnpm install --frozen-lockfile --filter "@vocab/factory-worker..." --filter "vocab" \
+ && cd /app && CI=true /opt/pnpm/bin/pnpm install --frozen-lockfile --filter "@ceh/factory-worker..." --filter "ceh" \
  && rm -rf /root/.cache /root/.local/share/pnpm /root/.npm /opt/pnpm \
  && chown factory:factory /app/node_modules
 WORKDIR /app
 USER factory:factory
 ENTRYPOINT []
 
-# The build container (ADR 0011): factory-build <role> --input <key>. The worker with pnpm and
-# the dev dependencies (Vitest, TypeScript, ESLint) from the frozen lockfile, as in
-# boundary-check, plus a pnpm store warmed from the same lockfile, so a clone of the repository
-# installs with --offline. The store is the factory user's: pnpm may write to it while it
-# installs. /app's own packages come from root's store and cache (under HOME, which is the factory
-# user's), removed again, so the factory user still cannot change the factory's code. Like the worker, it holds no secret: the model credential
-# comes from the task's environment.
-FROM worker AS build
+# The build base (ADR 0011; ADR 0010, amendment of add-target-repositories): what every target's
+# build container starts from. The worker with pnpm and the factory's dev dependencies (Vitest,
+# TypeScript, ESLint) from the frozen lockfile, as in boundary-check. It holds no target's
+# toolchain and no dependency store: a target's `targets/<name>/build.Dockerfile` adds the
+# toolchain `FROM build-base`, and factory-build installs the clone's dependencies online before
+# each session. /app's own packages come from root's store and cache, removed again, so the
+# factory user still cannot change the factory's code. Like the worker, it holds no secret: the
+# model credential comes from the task's environment. It is not run on its own: the target's
+# Dockerfile is assembled after this one (`pnpm image:build --target <name>`, and the stack).
+FROM worker AS build-base
 USER root
 ENV PNPM_HOME=/opt/pnpm \
-    FACTORY_PNPM_STORE=/opt/pnpm-store \
     PATH=/opt/pnpm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN npm install --global --ignore-scripts --prefix /opt/pnpm pnpm@12.15.0 \
- && cd /app && CI=true NODE_ENV=development pnpm install --frozen-lockfile --filter "@vocab/factory-worker..." --filter "vocab" \
- && rm -rf /root/.cache /root/.local/share/pnpm /root/.npm /home/factory/.cache /home/factory/.local \
- && install --directory --owner factory --group factory /opt/pnpm-store
+ && cd /app && CI=true NODE_ENV=development pnpm install --frozen-lockfile --filter "@ceh/factory-worker..." --filter "ceh" \
+ && rm -rf /root/.cache /root/.local/share/pnpm /root/.npm /home/factory/.cache /home/factory/.local
 USER factory:factory
-RUN mkdir /tmp/warm \
- && cp /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /tmp/warm/ \
- && cd /tmp/warm && CI=true pnpm fetch --store-dir /opt/pnpm-store \
- && rm -rf /tmp/warm
 ENV FACTORY_CONTAINER=build
 WORKDIR /home/factory
 ENTRYPOINT ["node", "/app/factory/worker/src/build-main.ts"]

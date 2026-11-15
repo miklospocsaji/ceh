@@ -1,10 +1,12 @@
-import type { Recorder } from "@vocab/factory-roles";
+import type { Recorder } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { migrate } from "../src/migrate.ts";
 import { closeAttempt, createWorkItem, listAttempts, listMessages, openAttempt } from "../src/queries.ts";
 import { extractUsage, LedgerRecorder } from "../src/recorder.ts";
 import { createTestDatabase, type TestDatabase } from "../src/testing.ts";
 import { assistant, init, result } from "./messages.ts";
+
+const REPOSITORY = "miklospocsaji/vocab";
 
 const ROLE = "proposal-author";
 
@@ -19,7 +21,7 @@ beforeAll(async () => {
 
 async function newWorkItem(): Promise<string> {
   const issueNumber = nextIssue++;
-  const item = await createWorkItem(db.pool, { issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
+  const item = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber, changeId: `add-item-${String(issueNumber)}`, branch: `add-item-${String(issueNumber)}`, state: "proposal" });
   return item.id;
 }
 

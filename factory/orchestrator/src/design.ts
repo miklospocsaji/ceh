@@ -1,6 +1,6 @@
 /**
  * Design (add-build-loop design, "Worker states"): the architect writes `design.md` and any
- * contracts under `app/contracts/src/`. Its output is accepted once the change passes
+ * contracts under the target's contracts path. Its output is accepted once the change passes
  * `openspec validate --strict` and the result its schema (the runner checks both), and each
  * accepted design is committed and pushed. Then:
  * - `medium`: a design reviewer runs in a session of its own. `approve` sends the work item to
@@ -17,9 +17,9 @@
  * `design` runs the architect, `design-review` the reviewer on the pushed design.
  */
 import { join } from "node:path";
-import { ReviewResult } from "@vocab/factory-artifacts";
-import { closeAttempt, listAttempts, openAttempt, setWorkItemState, type AttemptRow, type WorkItemRow } from "@vocab/factory-ledger";
-import { AttemptFailed, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@vocab/factory-roles";
+import { ReviewResult } from "@ceh/factory-artifacts";
+import { closeAttempt, listAttempts, openAttempt, setWorkItemState, type AttemptRow, type WorkItemRow } from "@ceh/factory-ledger";
+import { AttemptFailed, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { NotApplicable } from "./approval.ts";
 import { changeFiles, changeFolder, currentSpecs, readComplexity, readIfExists } from "./change-files.ts";
 import { pendingDesignFlaw } from "./design-flaw.ts";
@@ -39,9 +39,6 @@ const AWAITING_DESIGN: WorkItemState = "awaiting-design-approval";
 const PLAN: WorkItemState = "plan";
 /** States Design has finished with; a repeated Design does nothing for them. */
 const PAST: readonly string[] = [AWAITING_DESIGN, PLAN, "build", "pr-open", "escalated"];
-
-/** Where the architect may write, as the role's config says; the design commit takes only these. */
-const CONTRACTS = "app/contracts/src";
 
 export interface DesignContext extends HandlerContext {
   runRole: RunRole;
@@ -108,12 +105,14 @@ export async function design(ctx: DesignContext, item: WorkItemRow): Promise<Tra
       }
       // Contracts are code, so a design that adds or changes them is a feature commit
       // (add-build-loop, "Commits and pull requests say what they hold").
-      const subject = (await hasChangesUnder(worktree, [CONTRACTS]))
+      // The architect may write only design.md and the target's contracts path; the commit takes only these.
+      const contracts = ctx.target.contracts;
+      const subject = (await hasChangesUnder(worktree, [contracts]))
         ? `feat(${item.changeId}): design the change and its contracts`
         : `docs(${item.changeId}): design the change`;
       await commitPaths({
         worktree,
-        paths: [`${changeFolder(item.changeId)}/design.md`, CONTRACTS],
+        paths: [`${changeFolder(item.changeId)}/design.md`, contracts],
         ...(ctx.committer === undefined ? {} : { identity: ctx.committer }),
         message: `${subject}\n\nWritten by the ${ctx.architect.name} role for issue #${String(item.issueNumber)}.`,
       });

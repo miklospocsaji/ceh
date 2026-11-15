@@ -6,12 +6,15 @@
  * task's record.
  */
 import { join } from "node:path";
-import { PlanResult } from "@vocab/factory-artifacts";
+import { PlanResult } from "@ceh/factory-artifacts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadRole, type Role } from "../src/config.ts";
 import { validatePlan } from "../src/plan.ts";
 import { createCostLog, outcomeOf, runProbe, type LiveAttempt } from "./live-harness.ts";
 import { apiKeyEnv, capped, CHANGE, CHANGE_ID, ISSUE, LIVE_CAP_USD, makeChangeRepo, readIfExists, report, SCENARIOS, type ChangeRepo } from "./live-change.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 let repo: ChangeRepo;
 let role: Role;
@@ -22,7 +25,7 @@ const costs = createCostLog();
 beforeAll(async () => {
   const env = apiKeyEnv();
   repo = makeChangeRepo("design.md");
-  role = capped(await loadRole("planner"));
+  role = capped(await loadRole("planner", TARGET));
   attempt = await runProbe(role, repo.root, { env, changeId: CHANGE_ID, issue: ISSUE, changeFiles: repo.changeFiles(), specs: repo.specs() });
   costs.track("planner", attempt);
   tasksMd = readIfExists(repo.root, `${CHANGE}/tasks.md`);
@@ -40,7 +43,7 @@ describe("live planner", () => {
     const plan = PlanResult.parse(attempt.outcome);
     expect(tasksMd, "no tasks.md").toBeDefined();
 
-    const [implementer, testAuthor] = await Promise.all([loadRole("implementer"), loadRole("test-author")]);
+    const [implementer, testAuthor] = await Promise.all([loadRole("implementer", TARGET), loadRole("test-author", TARGET)]);
     const problems = await validatePlan(plan, join(repo.root, CHANGE), tasksMd ?? "", undefined, {
       implementer: implementer.writable,
       testAuthor: testAuthor.writable,

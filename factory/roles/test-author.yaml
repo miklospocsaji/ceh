@@ -6,7 +6,7 @@ model: claude-sonnet-5-5
 # the diff check after the session (ADR 0011).
 runsIn: build
 tools: [Read, Grep, Glob, Edit, Write, Bash]
-# The app's typecheck and lint only: the whole repository's does not fit the build task.
+# The target's typecheck, lint and unit commands, from its target.yaml.
 # No install, no pnpm add, no network command and no git push. The runner denies git push and
 # network commands whatever this list says.
 allow:
@@ -15,16 +15,15 @@ allow:
   - Glob
   - Edit
   - Write
-  - Bash(pnpm typecheck:app)
-  - Bash(pnpm lint:app)
-  - Bash(pnpm exec vitest run:*)
+  - "Bash({target.typecheck})"
+  - "Bash({target.lint})"
+  - "Bash({target.unit}:*)"
   - Bash(git status:*)
   - Bash(git diff:*)
 # {taskStubs}: the task's source files that did not exist at the starting commit, filled per
 # attempt. The diff check fails an attempt that modified one instead of adding it.
 writable:
-  - app/*/test/**
-  - app/e2e/**
+  - "{target.writable}"
   - "{taskStubs}"
 skills: []
 maxTurns: 40

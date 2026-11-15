@@ -3,7 +3,7 @@
  * failed gates' result, the task and the changed paths. The gate result and the paths come from
  * agent-written code, so both are fenced as untrusted data; the task comes from the validated plan.
  */
-import type { GatesResult } from "@vocab/factory-artifacts";
+import type { GatesResult } from "@ceh/factory-artifacts";
 import { untrusted } from "./prompt.ts";
 
 export interface ClassifierInput {

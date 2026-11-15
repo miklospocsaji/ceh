@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
 import { loadRole, writableFor } from "../src/config.ts";
 import { createPathGuard, isWritable } from "../src/guard.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 const ROLE = "sample-role";
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
@@ -53,7 +56,7 @@ describe("loadRole", () => {
   // Control: without it, a loadRole that always throws would pass the scenarios below.
   it("loads a valid config", async () => {
     writeRole(validConfig);
-    const role = await loadRole(ROLE, { root });
+    const role = await loadRole(ROLE, TARGET, { root });
     expect(role.name).toBe(ROLE);
     expect(role.runsIn).toBe("worker");
     expect(role.writable).toEqual(validConfig.writable);
@@ -62,62 +65,62 @@ describe("loadRole", () => {
 
   it("loads a role that runs in the build container", async () => {
     writeRole({ ...validConfig, runsIn: "build", tools: [...validConfig.tools, "Bash"], allow: [...validConfig.allow, "Bash(pnpm lint)"] });
-    expect((await loadRole(ROLE, { root })).runsIn).toBe("build");
+    expect((await loadRole(ROLE, TARGET, { root })).runsIn).toBe("build");
   });
 
   it("reads the prompt from factory/roles/<role>.md, not .claude/agents", async () => {
     writeRole(validConfig, null);
     mkdirSync(join(root, ".claude/agents"), { recursive: true });
     writeFileSync(join(root, ".claude/agents", `${ROLE}.md`), "You are in the wrong place.\n");
-    await expect(loadRole(ROLE, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*factory/roles/${ROLE}\\.md`));
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*factory/roles/${ROLE}\\.md`));
 
     writeFileSync(join(root, "factory/roles", `${ROLE}.md`), "You are a sample role.\n");
-    expect((await loadRole(ROLE, { root })).prompt).toBe("You are a sample role.");
+    expect((await loadRole(ROLE, TARGET, { root })).prompt).toBe("You are a sample role.");
   });
 
   it("Scenario: Invalid config is refused (writable paths missing)", async () => {
     const config: Record<string, unknown> = { ...validConfig };
     delete config["writable"];
     writeRole(config);
-    await expect(loadRole(ROLE, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*writable`));
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*writable`));
   });
 
   it("Scenario: Invalid config is refused (unknown result schema)", async () => {
     writeRole({ ...validConfig, resultSchema: "no-such-schema" });
-    await expect(loadRole(ROLE, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*resultSchema`));
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*resultSchema`));
   });
 
   it("Scenario: Invalid config is refused (prompt file missing)", async () => {
     writeRole(validConfig, null);
-    await expect(loadRole(ROLE, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*factory/roles/${ROLE}\\.md`));
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*factory/roles/${ROLE}\\.md`));
   });
 
   it("Scenario: Invalid config is refused (runsIn missing)", async () => {
     const config: Record<string, unknown> = { ...validConfig };
     delete config["runsIn"];
     writeRole(config);
-    await expect(loadRole(ROLE, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*runsIn`));
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*runsIn`));
   });
 
   it("Scenario: Config without a place to run is refused", async () => {
     const missing: Record<string, unknown> = { ...validConfig };
     delete missing["runsIn"];
     writeRole(missing);
-    await expect(loadRole(ROLE, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "runsIn" });
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "runsIn" });
 
     for (const runsIn of ["lambda", "", "Worker"]) {
       writeRole({ ...validConfig, runsIn });
-      await expect(loadRole(ROLE, { root }), runsIn).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "runsIn" });
-      await expect(loadRole(ROLE, { root }), runsIn).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*runsIn`));
+      await expect(loadRole(ROLE, TARGET, { root }), runsIn).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "runsIn" });
+      await expect(loadRole(ROLE, TARGET, { root }), runsIn).rejects.toThrow(new RegExp(`${ROLE}[\\s\\S]*runsIn`));
     }
   });
 
   it("refuses a worker role with Bash among its tools or pre-approved calls", async () => {
     writeRole({ ...validConfig, tools: [...validConfig.tools, "Bash"] });
-    await expect(loadRole(ROLE, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "tools" });
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "tools" });
 
     writeRole({ ...validConfig, allow: [...validConfig.allow, "Bash(pnpm lint)"] });
-    await expect(loadRole(ROLE, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "allow" });
+    await expect(loadRole(ROLE, TARGET, { root })).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "allow" });
   });
 
   describe("the runner's deny list", () => {
@@ -125,11 +128,11 @@ describe("loadRole", () => {
 
     it("Scenario: Allowlist overlapping the deny list is refused", async () => {
       writeRole(buildConfig(["Bash(pnpm lint)", "Bash(git:*)"]));
-      const load = loadRole(ROLE, { root });
+      const load = loadRole(ROLE, TARGET, { root });
       await expect(load).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "allow" });
-      await expect(loadRole(ROLE, { root })).rejects.toThrow(ROLE);
-      await expect(loadRole(ROLE, { root })).rejects.toThrow("Bash(git:*)");
-      await expect(loadRole(ROLE, { root })).rejects.toThrow("git push");
+      await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow(ROLE);
+      await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow("Bash(git:*)");
+      await expect(loadRole(ROLE, TARGET, { root })).rejects.toThrow("git push");
     });
 
     it("refuses a bare Bash, Bash(*), a denied rule and a prefix rule that covers a denied command", async () => {
@@ -142,15 +145,15 @@ describe("loadRole", () => {
         ["Bash(n:*)", "nc"],
       ] as const) {
         writeRole(buildConfig([rule]));
-        await expect(loadRole(ROLE, { root }), rule).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "allow" });
-        await expect(loadRole(ROLE, { root }), rule).rejects.toThrow(denied);
+        await expect(loadRole(ROLE, TARGET, { root }), rule).rejects.toMatchObject({ name: "RoleConfigError", role: ROLE, field: "allow" });
+        await expect(loadRole(ROLE, TARGET, { root }), rule).rejects.toThrow(denied);
       }
     });
 
     // Control: the build roles' own allowlist loads, so the check is not a blanket refusal of Bash.
     it("loads an allowlist that no denied command falls under", async () => {
       writeRole(buildConfig(["Bash(pnpm typecheck)", "Bash(pnpm lint)", "Bash(pnpm exec vitest run:*)", "Bash(git status:*)", "Bash(git diff:*)"]));
-      expect((await loadRole(ROLE, { root })).allow).toContain("Bash(git diff:*)");
+      expect((await loadRole(ROLE, TARGET, { root })).allow).toContain("Bash(git diff:*)");
     });
   });
 });
@@ -171,7 +174,7 @@ describe("the repository's roles", () => {
   });
 
   it("Scenario: Worker roles have no Bash", async () => {
-    const roles = await Promise.all(repoRoles().map((name) => loadRole(name)));
+    const roles = await Promise.all(repoRoles().map((name) => loadRole(name, TARGET)));
     const workerRoles = roles.filter((role) => role.runsIn === "worker");
     // Control: the proposal author runs in the worker, so the loop below is never empty.
     expect(workerRoles.map((role) => role.name)).toContain("proposal-author");

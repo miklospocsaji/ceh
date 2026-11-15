@@ -9,8 +9,10 @@
  *
  * 1. Refuse to start (exit 2) if the environment holds any factory credential other than the
  *    model credential. The error names the variable, never its value.
- * 2. Read `input.json` from the store; check it, and that the role runs in the build container.
- * 3. Clone the branch with no token into `<home>/work`, check out `baseCommit`, install.
+ * 2. Read `input.json` from the store; check it, load its target (which must be the image's,
+ *    `FACTORY_TARGET`), and check that the role runs in the build container.
+ * 3. Clone the branch with no token into `<home>/work`, check out `baseCommit`, and run the
+ *    target's install command there, online, with no credential in its environment.
  * 4. Run the role, recording its messages to `messages.jsonl` rather than the ledger.
  * 5. Run the diff check against `baseCommit`, from the input and never from the clone's HEAD.
  * 6. If the session and the diff check passed, run the gates: red after the test author, green
@@ -29,8 +31,8 @@ import { execFile } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join, posix, relative, sep } from "node:path";
 import { parseArgs, promisify } from "node:util";
-import { BuildOutcome, PlanResult, type GatesResult } from "@vocab/factory-artifacts";
-import { redact, runGates as defaultRunGates, type RunGatesOptions } from "@vocab/factory-gates";
+import { BuildOutcome, PlanResult, type GatesResult } from "@ceh/factory-artifacts";
+import { redact, runGates as defaultRunGates, targetGates, type RunGatesOptions } from "@ceh/factory-gates";
 import {
   AttemptFailed,
   diffCheck,
@@ -43,8 +45,9 @@ import {
   type Recorder,
   type Role,
   type RunRole,
-} from "@vocab/factory-roles";
-import { nextBuildKey, parseNextBuild } from "@vocab/factory-orchestrator";
+} from "@ceh/factory-roles";
+import { nextBuildKey, parseNextBuild } from "@ceh/factory-orchestrator";
+import { commandArgs, TargetConfigError, type Target } from "@ceh/factory-target";
 import { z } from "zod";
 import { checkKey, InvalidStoreKey, type ArtifactStore } from "./store.ts";
 
@@ -76,6 +79,8 @@ const GATE_MODE: Readonly<Record<string, RunGatesOptions["mode"]>> = {
 };
 
 const TASK_STUBS = "{taskStubs}";
+/** The target a build image was built for, set by its `build.Dockerfile`. */
+const TARGET_VAR = "FACTORY_TARGET";
 const ROLE_NAME = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 /** The positional that reads the attempt from the task's next.json. */
 const FROM_NEXT = "build";
@@ -85,6 +90,8 @@ const TASK_ID = /^\d{1,4}(\.\d{1,4}){1,4}$/;
 
 /** `input.json`: what the worker hands one build container run. */
 export const BuildInput = z.strictObject({
+  /** The target the work item belongs to: a folder under `targets/` in the image. */
+  target: z.string().regex(/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/, "a target name"),
   changeId: z.string().regex(/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/, "a change id"),
   branch: z.string().min(1),
   baseCommit: z.string().regex(/^[0-9a-f]{40}$/, "a full commit SHA"),
@@ -105,9 +112,12 @@ export interface BuildDeps {
   home: string;
   /** The role runner around the run's recorder; the container is `build` only when `FACTORY_CONTAINER=build`. */
   createRunRole: (options: { recorder: Recorder; container: "worker" | "build" }) => RunRole;
-  loadRole: (name: string) => Promise<Role>;
-  /** Installs the clone's dependencies; defaults to an offline pnpm install. */
-  install?: (worktree: string) => Promise<void>;
+  /** Loads a target's config from the image. */
+  loadTarget: (name: string) => Promise<Target>;
+  /** Loads a role, resolved for the target. */
+  loadRole: (name: string, target: Target) => Promise<Role>;
+  /** Installs the clone's dependencies; defaults to the target's install command, with no credential. */
+  install?: (worktree: string, command: string) => Promise<void>;
   /** Defaults to the gates of add-build-gates. */
   runGates?: (options: RunGatesOptions) => Promise<GatesResult>;
   /** Makes the attempt's patch; defaults to `diffPatch`. */
@@ -137,9 +147,10 @@ export async function runBuild(argv: string[], deps: BuildDeps): Promise<number>
   try {
     const { roleName, inputKey, patchKey } = await resolveBuildArgs(deps.store, parseBuildArgs(argv));
     const input = await readInput(deps.store, inputKey);
-    const role = await requireBuildRole(deps, roleName);
+    const target = await requireTarget(deps, input.target);
+    const role = await requireBuildRole(deps, roleName, target);
     const patch = patchKey === undefined ? undefined : await readPatch(deps.store, role, patchKey);
-    return await build(deps, role, input, inputKey, secrets, patch);
+    return await build(deps, target, role, input, inputKey, secrets, patch);
   } catch (error) {
     const message = redact(error instanceof Error ? error.message : String(error), secrets);
     if (error instanceof InvalidInput) {
@@ -248,10 +259,22 @@ async function readInput(store: ArtifactStore, key: string): Promise<BuildInput>
   return parsed.data;
 }
 
-async function requireBuildRole(deps: BuildDeps, name: string): Promise<Role> {
+/** The input's target, which must be the one this image was built for (`FACTORY_TARGET`), loaded from the image. */
+async function requireTarget(deps: BuildDeps, name: string): Promise<Target> {
+  const own = deps.env[TARGET_VAR];
+  if (own !== undefined && own !== name) throw new InvalidInput(`the input is for target ${name}, but this build image is for target ${own} (${TARGET_VAR})`);
+  try {
+    return await deps.loadTarget(name);
+  } catch (error) {
+    if (error instanceof TargetConfigError) throw new InvalidInput(error.message);
+    throw error;
+  }
+}
+
+async function requireBuildRole(deps: BuildDeps, name: string, target: Target): Promise<Role> {
   let role: Role;
   try {
-    role = await deps.loadRole(name);
+    role = await deps.loadRole(name, target);
   } catch (error) {
     throw new InvalidInput(error instanceof Error ? error.message : String(error));
   }
@@ -260,7 +283,7 @@ async function requireBuildRole(deps: BuildDeps, name: string): Promise<Role> {
   return role;
 }
 
-async function build(deps: BuildDeps, role: Role, input: BuildInput, inputKey: string, secrets: string[], patch: string | undefined): Promise<number> {
+async function build(deps: BuildDeps, target: Target, role: Role, input: BuildInput, inputKey: string, secrets: string[], patch: string | undefined): Promise<number> {
   const { store, env } = deps;
   const { changeId, baseCommit, task } = input;
   const mode = GATE_MODE[role.name] ?? "green";
@@ -269,7 +292,10 @@ async function build(deps: BuildDeps, role: Role, input: BuildInput, inputKey: s
 
   const worktree = join(deps.home, "work");
   await clone(input, worktree, env);
-  await (deps.install ?? ((dir: string) => install(dir, env, deps.out)))(worktree);
+  const installStarted = performance.now();
+  await (deps.install ?? ((dir: string, command: string) => install(dir, command, env)))(worktree, target.commands.install);
+  const installMs = Math.round(performance.now() - installStarted);
+  deps.out(`factory-build: install: \`${target.commands.install}\` took ${(installMs / 1000).toFixed(1)} s\n`);
 
   const stubs = role.writable.includes(TASK_STUBS) ? await newFiles(worktree, baseCommit, task.files) : [];
   const recorder = new JsonlRecorder();
@@ -315,6 +341,7 @@ async function build(deps: BuildDeps, role: Role, input: BuildInput, inputKey: s
       task: { id: task.id, scenarios: task.scenarios, coveredSoFar: input.coveredSoFar },
       mode,
       secrets,
+      ...targetGates(target),
     });
     gatesKey = key("gates.json");
     await store.put(gatesKey, `${JSON.stringify(gates, null, 2)}\n`);
@@ -344,6 +371,7 @@ async function build(deps: BuildDeps, role: Role, input: BuildInput, inputKey: s
     patch: patchKey,
     messages: messagesKey,
     baseCommit,
+    installMs,
   });
   await store.put(key("outcome.json"), `${JSON.stringify(outcome, null, 2)}\n`);
   deps.out(`factory-build: ${role.name}${patch === undefined ? "" : " (gates only)"} for task ${task.id} of ${changeId}: ${outcome.outcome}${reason === undefined ? "" : ` (${reason})`}\n`);
@@ -377,20 +405,13 @@ async function applyPatch(worktree: string, patch: string, env: Record<string, s
 }
 
 /**
- * `pnpm install --frozen-lockfile --offline` from the image's warm store
- * (`FACTORY_PNPM_STORE`). A branch whose lockfile differs from the image's falls back to an
- * online install, which is logged.
+ * The target's install command, in the clone, from the registry (ADR 0010, amendment of
+ * add-target-repositories): the image holds no dependencies of the target's. Its environment is
+ * `toolEnv`, so dependency scripts see no credential.
  */
-async function install(worktree: string, env: Record<string, string | undefined>, out: (text: string) => void): Promise<void> {
-  const store = env["FACTORY_PNPM_STORE"];
-  const args = ["install", "--frozen-lockfile", ...(store === undefined ? [] : ["--store-dir", store])];
-  const options = { cwd: worktree, env: toolEnv(env), maxBuffer: MAX_BUFFER };
-  try {
-    await run("pnpm", [...args, "--offline"], options);
-  } catch {
-    out("factory-build: online-install: the offline install failed, so the lockfile differs from the image's; installing online\n");
-    await run("pnpm", args, options);
-  }
+async function install(worktree: string, command: string, env: Record<string, string | undefined>): Promise<void> {
+  const [file, ...args] = commandArgs(command);
+  await run(file, args, { cwd: worktree, env: toolEnv(env), maxBuffer: MAX_BUFFER });
 }
 
 /** The task's files that did not exist at `baseCommit`: the test author's stubs. */

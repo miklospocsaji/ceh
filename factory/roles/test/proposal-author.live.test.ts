@@ -11,13 +11,16 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync } from
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ProposalResult } from "@vocab/factory-artifacts";
+import { ProposalResult } from "@ceh/factory-artifacts";
 import { parse } from "yaml";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadRole, type Role } from "../src/config.ts";
 import type { PromptArtifact, RetryEvidence } from "../src/prompt.ts";
 import { AttemptFailed } from "../src/runner.ts";
 import { createCostLog, outcomeOf, removeDir, runProbe, toolCalls, type LiveAttempt } from "./live-harness.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 const REPO = resolve(import.meta.dirname, "../../..");
 const OPENSPEC = join(REPO, "node_modules/.bin/openspec");
@@ -57,7 +60,7 @@ beforeAll(async () => {
   worktree = join(parent, "worktree");
   git("worktree", "add", "--detach", worktree, "HEAD");
 
-  role = await loadRole("proposal-author", { root: worktree });
+  role = await loadRole("proposal-author", TARGET, { root: worktree });
   let evidence: RetryEvidence | undefined;
   while (attempts.length < MAX_ATTEMPTS) {
     const attempt = await runProbe(role, worktree, {

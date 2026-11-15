@@ -1,4 +1,5 @@
-import { GatesResult, type GateCheck } from "@vocab/factory-artifacts";
+import { GatesResult, type GateCheck } from "@ceh/factory-artifacts";
+import type { Target } from "@ceh/factory-target";
 import * as checks from "./checks.ts";
 import { checkCoverage } from "./coverage.ts";
 import { boundOutput, redact } from "./redact.ts";
@@ -17,9 +18,19 @@ export type RunGatesOptions = {
   changeId: string;
   task: GatesTask;
   mode: "red" | "green";
+  /** The target's typecheck, lint, unit and spec-validation commands. */
+  commands: checks.GateCommands;
+  /** Where coverage looks for tests when Vitest wrote no report: the target's coverage test directory. */
+  coverageTestsDir: string;
   /** Values to replace with `[redacted]` in every field of the result. */
   secrets?: readonly string[] | undefined;
 };
+
+/** What the gates take from a target's config. */
+export function targetGates(target: Target): Pick<RunGatesOptions, "commands" | "coverageTestsDir"> {
+  const { typecheck, lint, unit, specValidate } = target.commands;
+  return { commands: { typecheck, lint, unit, unitTestPath: target.unitTestPath, specValidate }, coverageTestsDir: target.coverageTestsDir };
+}
 
 type GateTest = NonNullable<GateCheck["tests"]>[number];
 
@@ -95,15 +106,16 @@ function clean(result: GatesResult, secrets: readonly string[]): GatesResult {
 
 /**
  * Runs the red or green gates for one task in a worktree. Every check of the mode runs, even
- * after one fails. Only the app's tests run, with a fixed environment (see `checkEnv`).
+ * after one fails. The checks are the target's own commands, run with a fixed environment (see
+ * `checkEnv`); only the tests under its unit test path run.
  */
 export async function runGates(options: RunGatesOptions): Promise<GatesResult> {
-  const { worktree, changeId, task, mode } = options;
+  const { worktree, changeId, task, mode, commands } = options;
   const results: GateCheck[] = [];
-  results.push(commandCheck("typecheck", await checks.typecheck(worktree)));
-  results.push(commandCheck("lint", await checks.lint(worktree)));
+  results.push(commandCheck("typecheck", await checks.typecheck(worktree, commands)));
+  results.push(commandCheck("lint", await checks.lint(worktree, commands)));
 
-  const run = await checks.unit(worktree);
+  const run = await checks.unit(worktree, commands);
   const files = parseReport(run, worktree);
   if (mode === "red") {
     // The unit run itself only has to produce a report: the red check judges its failures.
@@ -112,9 +124,9 @@ export async function runGates(options: RunGatesOptions): Promise<GatesResult> {
   } else {
     const unitCheck = commandCheck("unit", run, run.exitCode === 0 && files !== null);
     results.push(files === null ? unitCheck : { ...unitCheck, tests: [...loadErrors(files), ...failedTests(files)] });
-    results.push(commandCheck("spec", await checks.spec(worktree, changeId)));
+    results.push(commandCheck("spec", await checks.spec(worktree, commands, changeId)));
     const started = performance.now();
-    const coverage = await checkCoverage({ worktree, changeId, scenarios: task.coveredSoFar ?? task.scenarios, report: files ?? undefined });
+    const coverage = await checkCoverage({ worktree, changeId, scenarios: task.coveredSoFar ?? task.scenarios, report: files ?? undefined, testsDir: options.coverageTestsDir });
     const output = coverage.passed ? "Every scenario has a test.\n" : coverage.missing.map((title) => `No test names the scenario: ${title}\n`).join("");
     results.push({ name: "coverage", passed: coverage.passed, exitCode: null, durationMs: Math.round(performance.now() - started), output, missing: coverage.missing });
   }

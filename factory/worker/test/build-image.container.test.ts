@@ -2,7 +2,7 @@
  * Live Bash boundaries inside the build container (add-build-roles task 2.14): real Agent SDK
  * sessions on Haiku with throwaway probe roles, about $0.10 each at most, run by the runner with
  * `container: "build"` and so with the sandbox off (ADR 0011). `build-container.live.test.ts`
- * runs this file in the image's `build` target, started with no added capabilities, the model
+ * runs this file in vocab's build image, started with no added capabilities, the model
  * credentials and some decoy credentials in its environment, and FACTORY_AUTH_MODE=api-key.
  * Never run on the host: the probes need FACTORY_CONTAINER=build.
  */

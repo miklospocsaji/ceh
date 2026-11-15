@@ -2,10 +2,13 @@
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { nextBuildKey } from "@vocab/factory-orchestrator";
+import { nextBuildKey } from "@ceh/factory-orchestrator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FsStore } from "../../worker/src/store.ts";
-import { dockerBuildRunner, LOCAL_BUILD_IMAGE, type Exec } from "../src/docker-build.ts";
+import { dockerBuildRunner, type Exec } from "../src/docker-build.ts";
+import { localBuildImage } from "../../worker/src/image.ts";
+
+const IMAGE = localBuildImage({ name: "vocab" });
 
 const CHANGE_ID = "add-import-kindle-vocab-db";
 const TOKEN = "sk-ant-oat01-local-test-token";
@@ -39,7 +42,7 @@ describe("dockerBuildRunner", () => {
     await store.put(nextBuildKey(CHANGE_ID, "1.1"), JSON.stringify({ role: "implementer", mode: "session", input: INPUT }));
     const { exec, calls } = recordingExec();
 
-    await dockerBuildRunner({ storeDir: root, env: { PATH: "/usr/bin", CLAUDE_CODE_OAUTH_TOKEN: TOKEN, FACTORY_DATABASE_URL: "postgres://x" }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
+    await dockerBuildRunner({ storeDir: root, image: IMAGE, env: { PATH: "/usr/bin", CLAUDE_CODE_OAUTH_TOKEN: TOKEN, FACTORY_DATABASE_URL: "postgres://x" }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
 
     expect(calls).toHaveLength(1);
     const [call] = calls;
@@ -53,7 +56,7 @@ describe("dockerBuildRunner", () => {
       "FACTORY_STORE_DIR=/store",
       "--env",
       "CLAUDE_CODE_OAUTH_TOKEN",
-      LOCAL_BUILD_IMAGE,
+      IMAGE,
       "implementer",
       "--input",
       INPUT,
@@ -71,7 +74,7 @@ describe("dockerBuildRunner", () => {
     await store.put(nextBuildKey(CHANGE_ID, "1.1"), JSON.stringify({ role: "implementer", mode: "gates-only", input: rerun, patch }));
     const { exec, calls } = recordingExec();
 
-    await dockerBuildRunner({ storeDir: root, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
+    await dockerBuildRunner({ storeDir: root, image: IMAGE, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
 
     expect(calls[0]?.args.slice(-5)).toEqual(["implementer", "--input", rerun, "--patch", patch]);
   });
@@ -81,7 +84,7 @@ describe("dockerBuildRunner", () => {
     await store.put(nextBuildKey(CHANGE_ID, "1.1"), JSON.stringify({ role: "implementer", mode: "session", input: INPUT }));
     const { exec } = recordingExec();
 
-    await dockerBuildRunner({ storeDir: root, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
+    await dockerBuildRunner({ storeDir: root, image: IMAGE, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" });
 
     // The build image runs as its own user, so it writes its outputs into a folder the owner owns.
     expect(statSync(join(root, dirname(INPUT))).mode & 0o777).toBe(0o777);
@@ -92,14 +95,14 @@ describe("dockerBuildRunner", () => {
     await store.put(nextBuildKey(CHANGE_ID, "1.1"), JSON.stringify({ role: "implementer", mode: "session", input: "work-items/../../etc/input.json" }));
     const { exec, calls } = recordingExec();
 
-    await expect(dockerBuildRunner({ storeDir: root, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow();
+    await expect(dockerBuildRunner({ storeDir: root, image: IMAGE, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow();
     expect(calls).toEqual([]);
   });
 
   it("refuses a task with no next build", async () => {
     const { exec, calls } = recordingExec();
 
-    await expect(dockerBuildRunner({ storeDir: root, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow(/next/);
+    await expect(dockerBuildRunner({ storeDir: root, image: IMAGE, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow(/next/);
     expect(calls).toEqual([]);
   });
 
@@ -107,7 +110,7 @@ describe("dockerBuildRunner", () => {
     await store.put(nextBuildKey(CHANGE_ID, "1.1"), JSON.stringify({ role: "implementer", mode: "session", input: INPUT }));
     const { exec, calls } = recordingExec();
 
-    await expect(dockerBuildRunner({ storeDir: root, env: {}, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow(/CLAUDE_CODE_OAUTH_TOKEN/);
+    await expect(dockerBuildRunner({ storeDir: root, image: IMAGE, env: {}, exec })({ changeId: CHANGE_ID, taskId: "1.1" })).rejects.toThrow(/CLAUDE_CODE_OAUTH_TOKEN/);
     expect(calls).toEqual([]);
   });
 });

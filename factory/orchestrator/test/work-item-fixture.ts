@@ -7,10 +7,10 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FakeForge } from "@vocab/factory-forge/testing";
-import { LedgerRecorder, migrate, type WorkItemRow } from "@vocab/factory-ledger";
-import { createTestDatabase, type TestDatabase } from "@vocab/factory-ledger/testing";
-import { loadRole, type PlanPaths } from "@vocab/factory-roles";
+import { FakeForge } from "@ceh/factory-forge/testing";
+import { LedgerRecorder, migrate, type WorkItemRow } from "@ceh/factory-ledger";
+import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
+import { loadRole, type PlanPaths } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { approved } from "../src/approval.ts";
 import { changeFileReader, type GitIdentity } from "../src/git.ts";
@@ -18,13 +18,16 @@ import { intake } from "../src/intake.ts";
 import { plan } from "../src/plan.ts";
 import { proposal } from "../src/proposal.ts";
 import { CHANGE_FILES, createFakeRoleRunner, validResult, type FakeStep } from "./fake-role-runner.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const TARGET = testTarget();
 
 export const CHANGE_ID = "add-import-kindle-vocab-db";
 export const CHANGE = `openspec/changes/${CHANGE_ID}`;
 export const ISSUE = { number: 12, title: "Import Kindle vocab.db", body: "Import the lookups and books from the Kindle's vocab.db." };
 
 /** The App's bot user, as the worker commits as it. */
-export const BOT: GitIdentity = { name: "vocab-factory[bot]", email: "123456+vocab-factory[bot]@users.noreply.github.com" };
+export const BOT: GitIdentity = { name: "ceh-app[bot]", email: "123456+ceh-app[bot]@users.noreply.github.com" };
 
 /** A delta spec with two scenarios, so a plan can split them over two tasks. */
 export const SPEC = [
@@ -119,12 +122,12 @@ export function proposalStep(complexity: string): FakeStep {
 
 /** Intake and a valid proposal of the given complexity: the work item is awaiting-proposal-approval. */
 export async function proposedWorkItem(f: Fixture, complexity: string): Promise<WorkItemRow> {
-  const ctx = { db: f.db.pool, forge: f.forge };
+  const ctx = { db: f.db.pool, forge: f.forge, target: TARGET };
   const created = await intake(ctx, { issueNumber: ISSUE.number });
   if (created.kind !== "advance") throw new Error(`intake did not advance: ${JSON.stringify(created)}`);
   const fake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), [proposalStep(complexity)]);
   const proposed = await proposal(
-    { ...ctx, runRole: fake.runRole, role: await loadRole("proposal-author"), repo: f.repo, home: f.home, committer: BOT },
+    { ...ctx, runRole: fake.runRole, role: await loadRole("proposal-author", TARGET), repo: f.repo, home: f.home, committer: BOT },
     created.workItem,
   );
   if (proposed.kind !== "advance") throw new Error(`proposal did not advance: ${JSON.stringify(proposed)}`);
@@ -168,12 +171,12 @@ export const planStep = (tasksMd = TASKS_MD, result: unknown = PLAN): FakeStep =
 
 /** A `small` change through Approved and Plan: the work item is in `build`, with PLAN's tasks in the ledger. */
 export async function plannedWorkItem(f: Fixture): Promise<WorkItemRow> {
-  const ctx = { db: f.db.pool, forge: f.forge };
+  const ctx = { db: f.db.pool, forge: f.forge, target: TARGET };
   const routed = await approved({ ...ctx, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) }, await proposedWorkItem(f, "small"));
   if (routed.kind !== "advance") throw new Error(`approved did not advance: ${JSON.stringify(routed)}`);
   const fake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), [planStep()]);
   const planned = await plan(
-    { ...ctx, runRole: fake.runRole, planner: await loadRole("planner"), planPaths: await planPaths(), repo: f.repo, home: f.home, committer: BOT },
+    { ...ctx, runRole: fake.runRole, planner: await loadRole("planner", TARGET), planPaths: await planPaths(), repo: f.repo, home: f.home, committer: BOT },
     routed.workItem,
   );
   if (planned.kind !== "advance") throw new Error(`plan did not advance: ${JSON.stringify(planned)}`);
@@ -182,7 +185,7 @@ export async function plannedWorkItem(f: Fixture): Promise<WorkItemRow> {
 
 /** The plan paths from the build roles' configs. */
 export async function planPaths(): Promise<PlanPaths> {
-  return { implementer: (await loadRole("implementer")).writable, testAuthor: (await loadRole("test-author")).writable };
+  return { implementer: (await loadRole("implementer", TARGET)).writable, testAuthor: (await loadRole("test-author", TARGET)).writable };
 }
 
 /** The subjects of the commits on the remote branch after `since`, oldest first. */

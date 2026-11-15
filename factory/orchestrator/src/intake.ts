@@ -5,7 +5,7 @@ import {
   IssueHasWorkItem,
   setWorkItemState,
   type WorkItemRow,
-} from "@vocab/factory-ledger";
+} from "@ceh/factory-ledger";
 import { deriveChangeId } from "./change-id.ts";
 import type { HandlerContext, Transition, WorkItemState } from "./handler.ts";
 
@@ -33,12 +33,15 @@ const NEXT: WorkItemState = "proposal";
  *
  * In the cloud, the work item belongs to the execution that created it. Intake for another
  * execution (the issue relabelled, or a delivery repeated) returns `duplicate` and changes
- * nothing; so does one whose insert loses to a concurrent Intake on the unique issue number.
+ * nothing; so does one whose insert loses to a concurrent Intake on the repository's unique
+ * issue number. The work item belongs to the target's repository: another repository may hold
+ * the same issue number and the same change id.
  */
 export async function intake(ctx: HandlerContext, item: IntakeItem): Promise<Transition> {
   const { db, forge } = ctx;
+  const { repository } = ctx.target;
 
-  const existing = await findWorkItemByIssue(db, item.issueNumber);
+  const existing = await findWorkItemByIssue(db, repository, item.issueNumber);
   if (existing !== undefined) return isOtherExecution(existing, item) ? { kind: "duplicate", workItem: existing } : finish(ctx, existing);
 
   const issue = await forge.getIssue(item.issueNumber);
@@ -49,11 +52,12 @@ export async function intake(ctx: HandlerContext, item: IntakeItem): Promise<Tra
 
   const changeId = await deriveChangeId(
     issue.title,
-    async (id) => (await findWorkItemByChangeId(db, id)) !== undefined || (await forge.branchExists(id)),
+    async (id) => (await findWorkItemByChangeId(db, repository, id)) !== undefined || (await forge.branchExists(id)),
   );
   let created: WorkItemRow;
   try {
     created = await createWorkItem(db, {
+      repository,
       issueNumber: issue.number,
       changeId,
       branch: changeId,
@@ -62,7 +66,7 @@ export async function intake(ctx: HandlerContext, item: IntakeItem): Promise<Tra
     });
   } catch (error) {
     if (!(error instanceof IssueHasWorkItem)) throw error;
-    const winner = await findWorkItemByIssue(db, item.issueNumber);
+    const winner = await findWorkItemByIssue(db, repository, item.issueNumber);
     if (winner === undefined) throw error;
     return isOtherExecution(winner, item) ? { kind: "duplicate", workItem: winner } : finish(ctx, winner);
   }

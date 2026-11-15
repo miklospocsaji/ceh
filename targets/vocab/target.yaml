@@ -1,0 +1,34 @@
+# The Kindle vocabulary app (brief, section 6). Everything ceh knows about the repository it
+# works on; the app's own repository knows nothing about ceh. The writable globs are a security
+# boundary, so they change here, through ceh, never through one of the target's work items.
+name: vocab
+repository: miklospocsaji/vocab
+defaultBranch: master
+# The only login whose /approve counts (ADR 0009).
+owner: miklospocsaji
+# Plain words, run without a shell by the gates and matched as Bash rules for the build roles.
+commands:
+  install: pnpm install --frozen-lockfile
+  typecheck: pnpm typecheck
+  lint: pnpm lint
+  # A Vitest run: the gates add the reporters and the unit test path.
+  unit: pnpm exec vitest run
+  specValidate: pnpm exec openspec validate {changeId} --strict --no-interactive
+unitTestPath: app/
+coverageTestsDir: app
+# The architect's; the design commit takes this path.
+contracts: app/contracts/src
+writable:
+  test-author:
+    - app/*/test/**
+    - app/e2e/**
+  # App and preview stacks only (owner decision, brief section 8). The ! exclusion keeps the
+  # contracts out of app/*/src/**.
+  implementer:
+    - app/*/src/**
+    - "!app/contracts/**"
+    - infra/app-stack.ts
+    - infra/preview-stack.ts
+    - infra/app/**
+# Model spend per work item, in USD (brief, section 8). Not enforced before M6.
+budgetUsd: 5

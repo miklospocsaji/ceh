@@ -5,8 +5,8 @@
  * failed attempt, with these messages as its evidence.
  */
 import { basename, posix } from "node:path";
-import type { PlanResult } from "@vocab/factory-artifacts";
-import { scenarioTitles } from "@vocab/factory-gates";
+import type { PlanResult } from "@ceh/factory-artifacts";
+import { scenarioTitles } from "@ceh/factory-gates";
 import { writableFor } from "./config.ts";
 import { isWritable } from "./guard.ts";
 

@@ -1,6 +1,6 @@
 // Complexity routing, Design and the owner's design approval (add-build-loop task 3.5).
-import { findOpenApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, type WorkItemRow } from "@vocab/factory-ledger";
-import { loadRole, renderPrompt, type Role } from "@vocab/factory-roles";
+import { findOpenApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, type WorkItemRow } from "@ceh/factory-ledger";
+import { loadRole, renderPrompt, type Role } from "@ceh/factory-roles";
 import { beforeAll, describe, expect, it } from "vitest";
 import { approved, awaitApproval } from "../src/approval.ts";
 import { design, MAX_DESIGN_ATTEMPTS, type DesignContext } from "../src/design.ts";
@@ -8,6 +8,11 @@ import { changeFileReader } from "../src/git.ts";
 import { DESIGN_APPROVAL_INSTRUCTION } from "../src/summary.ts";
 import { createFakeRoleRunner, type FakeStep } from "./fake-role-runner.ts";
 import { BOT, CHANGE, CHANGE_ID, changedFiles, git, identityOf, ISSUE, proposedWorkItem, remoteHead, SPEC, useWorkItemFixture } from "./work-item-fixture.ts";
+import { testTarget } from "@ceh/factory-target/testing";
+
+const REPOSITORY = "miklospocsaji/vocab";
+
+const TARGET = testTarget();
 
 const f = useWorkItemFixture("design");
 
@@ -33,18 +38,18 @@ let architect: Role;
 let designReviewer: Role;
 
 beforeAll(async () => {
-  architect = await loadRole("architect");
-  designReviewer = await loadRole("design-reviewer");
+  architect = await loadRole("architect", TARGET);
+  designReviewer = await loadRole("design-reviewer", TARGET);
 });
 
 function approvedContext() {
-  return { db: f.db.pool, forge: f.forge, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) };
+  return { db: f.db.pool, forge: f.forge, target: TARGET, readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) };
 }
 
 function designContext(steps: FakeStep[]): { ctx: DesignContext; calls: ReturnType<typeof createFakeRoleRunner>["calls"] } {
   const fake = createFakeRoleRunner(new LedgerRecorder(f.db.pool), steps);
   return {
-    ctx: { db: f.db.pool, forge: f.forge, runRole: fake.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT },
+    ctx: { db: f.db.pool, forge: f.forge, target: TARGET, runRole: fake.runRole, architect, designReviewer, repo: f.repo, home: f.home, committer: BOT },
     calls: fake.calls,
   };
 }
@@ -70,7 +75,7 @@ describe("Approved routes on x-complexity", { timeout: 30_000 }, () => {
 
     // Design refuses a small change, so the route cannot pass through it.
     const { ctx, calls } = designContext([architectStep()]);
-    await expect(design(ctx, (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow)).rejects.toThrow(/small/);
+    await expect(design(ctx, (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow)).rejects.toThrow(/small/);
     expect(calls).toEqual([]);
     expect((await listAttempts(f.db.pool, workItem.id)).map((attempt) => attempt.role)).toEqual(["proposal-author"]);
   });
@@ -80,7 +85,7 @@ describe("Approved routes on x-complexity", { timeout: 30_000 }, () => {
 
     const first = await approved(approvedContext(), workItem);
     const comments = f.forge.comments.length;
-    const again = await approved(approvedContext(), (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow);
+    const again = await approved(approvedContext(), (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow);
 
     expect(first).toMatchObject({ kind: "advance", route: "design", workItem: { state: "proposal-approved" } });
     expect(again).toMatchObject({ kind: "advance", route: "design", workItem: { state: "proposal-approved" } });
@@ -92,7 +97,7 @@ describe("Approved routes on x-complexity", { timeout: 30_000 }, () => {
 
     const transition = await approved(approvedContext(), workItem);
 
-    const stored = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("escalated");
     expect(transition).toEqual({ kind: "escalate", workItem: stored, reason: expect.stringContaining("x-complexity") as unknown });
     expect(f.forge.comments.at(-1)?.body).toContain("x-complexity");
@@ -108,7 +113,7 @@ describe("design", { timeout: 30_000 }, () => {
 
     const transition = await design(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("plan");
     expect(transition).toMatchObject({ kind: "advance", route: "plan", workItem: { state: "plan" } });
 
@@ -147,6 +152,24 @@ describe("design", { timeout: 30_000 }, () => {
     expect(git(f.remote, "log", "-1", "--format=%s", head)).toBe(`feat(${CHANGE_ID}): design the change and its contracts`);
   });
 
+  it("takes the contracts path from the target, not from vocab's layout", async () => {
+    const target = testTarget({ contracts: "packages/api/contracts", writable: { "test-author": ["packages/*/tests/**"], implementer: ["packages/*/lib/**"] } });
+    const contract = "packages/api/contracts/lookup.ts";
+    // A file where vocab keeps its contracts is no contract of this target's: the commit leaves it out.
+    const elsewhere = "app/contracts/src/lookup.ts";
+    const step: FakeStep = {
+      files: { "design.md": DESIGN_MD, [`../../../${contract}`]: "export interface Lookup {\n  id: string;\n}\n", [`../../../${elsewhere}`]: "export {};\n" },
+      result: DESIGN_RESULT,
+    };
+    const { ctx } = designContext([step, APPROVE]);
+
+    await design({ ...ctx, target }, await approvedWorkItem("medium"));
+
+    const head = remoteHead(f);
+    expect([...changedFiles(f, head)].sort()).toEqual([contract, `${CHANGE}/design.md`].sort());
+    expect(git(f.remote, "log", "-1", "--format=%s", head)).toBe(`feat(${CHANGE_ID}): design the change and its contracts`);
+  });
+
   it("commits a design without contracts as docs", async () => {
     const { ctx } = designContext([architectStep(), APPROVE]);
 
@@ -168,7 +191,7 @@ describe("design", { timeout: 30_000 }, () => {
 
     // AwaitApproval for the design: the open approval, then the summary with the instruction.
     const comments = f.forge.comments.length;
-    await awaitApproval({ db: f.db.pool, forge: f.forge }, transition.workItem, TOKEN, "design");
+    await awaitApproval({ db: f.db.pool, forge: f.forge, target: TARGET }, transition.workItem, TOKEN, "design");
 
     expect(await findOpenApproval(f.db.pool, workItem.id)).toMatchObject({ kind: "design", taskToken: TOKEN, state: "open" });
     expect(f.forge.comments).toHaveLength(comments + 1);
@@ -180,7 +203,7 @@ describe("design", { timeout: 30_000 }, () => {
     expect(body).toContain("$0.25");
     expect(body.trim().split("\n\n").at(-1)).toBe(DESIGN_APPROVAL_INSTRUCTION);
     expect(DESIGN_APPROVAL_INSTRUCTION).toContain("`/approve`");
-    expect((await findWorkItemByIssue(f.db.pool, ISSUE.number))?.state).toBe("awaiting-design-approval");
+    expect((await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number))?.state).toBe("awaiting-design-approval");
   });
 
   it("Scenario: Requested changes reach the architect", async () => {
@@ -215,7 +238,7 @@ describe("design", { timeout: 30_000 }, () => {
 
     const transition = await design(ctx, workItem);
 
-    const stored = await findWorkItemByIssue(f.db.pool, ISSUE.number);
+    const stored = await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number);
     expect(stored?.state).toBe("escalated");
     expect(transition).toEqual({ kind: "escalate", workItem: stored, reason: expect.stringContaining("design") as unknown });
     expect(MAX_DESIGN_ATTEMPTS).toBe(3);
@@ -252,7 +275,7 @@ describe("design", { timeout: 30_000 }, () => {
     const head = remoteHead(f);
     const { ctx, calls } = designContext([]);
 
-    const transition = await design(ctx, (await findWorkItemByIssue(f.db.pool, ISSUE.number)) as WorkItemRow);
+    const transition = await design(ctx, (await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number)) as WorkItemRow);
 
     expect(transition).toMatchObject({ kind: "advance", workItem: { state: "plan" } });
     expect(calls).toEqual([]);

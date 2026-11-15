@@ -3,6 +3,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 export const fixtures = resolve(import.meta.dirname, "../fixtures");
+
+/** The fixture target's commands and coverage directory, as its `target.yaml` would name them. */
+export const TARGET_GATES = {
+  commands: {
+    typecheck: "pnpm typecheck",
+    lint: "pnpm lint",
+    unit: "pnpm exec vitest run",
+    unitTestPath: "app/",
+    specValidate: "pnpm exec openspec validate {changeId} --strict --no-interactive",
+  },
+  coverageTestsDir: "app",
+} as const;
 const repoRoot = resolve(import.meta.dirname, "../../../..");
 
 /** The repository's pinned tools that a fixture worktree runs. */

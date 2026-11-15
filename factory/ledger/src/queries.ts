@@ -2,7 +2,7 @@
  * Typed queries over the ledger. Ids are Postgres bigints, returned as strings; costs are
  * `numeric`, returned as numbers.
  */
-import type { FailureReason as RoleFailureReason } from "@vocab/factory-roles";
+import type { FailureReason as RoleFailureReason } from "@ceh/factory-roles";
 import pg from "pg";
 import type { Db } from "./db.ts";
 import type { TokenUsage } from "./recorder.ts";
@@ -14,6 +14,8 @@ export type AttemptOutcome = "succeeded" | "failed";
 
 export interface WorkItemRow {
   id: string;
+  /** The repository it belongs to, as `<owner>/<repo>`. */
+  repository: string;
   issueNumber: number;
   changeId: string;
   branch: string;
@@ -27,6 +29,8 @@ export interface WorkItemRow {
 }
 
 export interface NewWorkItem {
+  /** `<owner>/<repo>`. */
+  repository: string;
   issueNumber: number;
   changeId: string;
   branch: string;
@@ -173,12 +177,13 @@ export class ApprovalAlreadyOpen extends Error {
 }
 
 const UNIQUE_VIOLATION = "23505";
-const CHANGE_ID_KEY = "work_items_change_id_key";
-const ISSUE_NUMBER_KEY = "work_items_issue_number_key";
+const CHANGE_ID_KEY = "work_items_repository_change_id_key";
+const ISSUE_NUMBER_KEY = "work_items_repository_issue_number_key";
 const ONE_OPEN_APPROVAL = "approvals_one_open_idx";
 
 interface WorkItemRecord {
   id: string;
+  repository: string;
   issue_number: number;
   change_id: string;
   branch: string;
@@ -246,7 +251,7 @@ interface MessageRecord {
   raw: unknown;
 }
 
-const WORK_ITEM_COLUMNS = "id, issue_number, change_id, branch, state, execution_arn, design_flaws, created_at, updated_at";
+const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, created_at, updated_at";
 const ATTEMPT_COLUMNS =
   "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates";
 const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by";
@@ -255,6 +260,7 @@ const TASK_COLUMNS = "id, work_item_id, task_id, position, title, depends_on, fi
 function toWorkItem(row: WorkItemRecord): WorkItemRow {
   return {
     id: row.id,
+    repository: row.repository,
     issueNumber: row.issue_number,
     changeId: row.change_id,
     branch: row.branch,
@@ -338,14 +344,14 @@ function only<T>(rows: T[], what: string): T {
 }
 
 /**
- * Rejects with ChangeIdTaken when another work item has the change id, and with
- * IssueHasWorkItem when the issue has one already (a concurrent Intake that lost).
+ * Rejects with ChangeIdTaken when another work item of the repository has the change id, and
+ * with IssueHasWorkItem when the repository's issue has one already (a concurrent Intake that lost).
  */
 export async function createWorkItem(db: Db, item: NewWorkItem): Promise<WorkItemRow> {
   try {
     const { rows } = await db.query<WorkItemRecord>(
-      `INSERT INTO work_items (issue_number, change_id, branch, state, execution_arn) VALUES ($1, $2, $3, $4, $5) RETURNING ${WORK_ITEM_COLUMNS}`,
-      [item.issueNumber, item.changeId, item.branch, item.state, item.executionArn ?? null],
+      `INSERT INTO work_items (repository, issue_number, change_id, branch, state, execution_arn) VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${WORK_ITEM_COLUMNS}`,
+      [item.repository, item.issueNumber, item.changeId, item.branch, item.state, item.executionArn ?? null],
     );
     return toWorkItem(only(rows, "createWorkItem"));
   } catch (error) {
@@ -355,17 +361,17 @@ export async function createWorkItem(db: Db, item: NewWorkItem): Promise<WorkIte
   }
 }
 
-/** The issue's work item; an issue has at most one (migration 0002). */
-export async function findWorkItemByIssue(db: Db, issueNumber: number): Promise<WorkItemRow | undefined> {
+/** The work item of a repository's issue; an issue has at most one (migration 0004). */
+export async function findWorkItemByIssue(db: Db, repository: string, issueNumber: number): Promise<WorkItemRow | undefined> {
   const { rows } = await db.query<WorkItemRecord>(
-    `SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE issue_number = $1 ORDER BY id DESC LIMIT 1`,
-    [issueNumber],
+    `SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE repository = $1 AND issue_number = $2`,
+    [repository, issueNumber],
   );
   return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
 }
 
-export async function findWorkItemByChangeId(db: Db, changeId: string): Promise<WorkItemRow | undefined> {
-  const { rows } = await db.query<WorkItemRecord>(`SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE change_id = $1`, [changeId]);
+export async function findWorkItemByChangeId(db: Db, repository: string, changeId: string): Promise<WorkItemRow | undefined> {
+  const { rows } = await db.query<WorkItemRecord>(`SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE repository = $1 AND change_id = $2`, [repository, changeId]);
   return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
 }
 
