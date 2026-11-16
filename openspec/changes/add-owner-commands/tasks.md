@@ -13,17 +13,17 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
 
 ### Forge
 
-- [ ] 1.2 Failing contract tests for `getComment(id)` on `FakeForge` and `GitHubForge` (against the fake GitHub API): it returns the id, issue number, author and body; a missing comment rejects with `not-found`; the token never appears in its errors. No scenario of this change.
-- [ ] 1.3 Write `IssueComment` and `getComment` in `factory/forge`.
+- [x] 1.2 Failing contract tests for `getComment(id)` on `FakeForge` and `GitHubForge` (against the fake GitHub API): it returns the id, issue number, author and body; a missing comment rejects with `not-found`; the token never appears in its errors. No scenario of this change.
+- [x] 1.3 Write `IssueComment` and `getComment` in `factory/forge`.
 
 ### Parsing and replies
 
-- [ ] 1.4 Failing tests for `parseCommand`: first line only, trimmed; verb up to the first whitespace; text over the following lines; lowercase known verbs; anything else unknown; a body without a leading `/` is not a command. No scenario on its own; the webhook and handler scenarios below rest on it.
-- [ ] 1.5 Write `factory/orchestrator/src/commands/parse.ts` and `replies.ts` (the fixed reply templates and the help table).
+- [x] 1.4 Failing tests for `parseCommand`: first line only, trimmed; verb up to the first whitespace; text over the following lines; lowercase known verbs; anything else unknown; a body without a leading `/` is not a command. No scenario on its own; the webhook and handler scenarios below rest on it.
+- [x] 1.5 Write `factory/orchestrator/src/commands/parse.ts` and `replies.ts` (the fixed reply templates and the help table).
 
 ### Command handler
 
-- [ ] 1.6 Failing handler tests, with `FakeForge`, a fake `TaskTokens` and the real ledger (the ledger rows come in task 2.2, so these tests fail until then too). Scenarios:
+- [x] 1.6 Failing handler tests, with `FakeForge`, a fake `TaskTokens` and the real ledger (the ledger rows come in task 2.2, so these tests fail until then too). Scenarios:
   - Command task checks the comment's author and issue
   - Unknown command gets the help text
   - Command while a role runs gets the busy reply
@@ -32,21 +32,21 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
   - Failed resume is reported on the issue
   - Owner's approval resumes the execution (handler half, carried)
   - Approval with nothing awaiting is answered (carried)
-- [ ] 1.7 Failing tests for `/status` and `/help`. Scenarios:
+- [x] 1.7 Failing tests for `/status` and `/help`. Scenarios:
   - Status while awaiting approval
   - Status during the build
   - Status with no work item
   - Help lists the commands
-- [ ] 1.8 Write `commands/handle.ts` and `commands/status.ts`; fold `approve()` into the `/approve` branch. Until the later M3.5 changes land, `/revise` and `/question` outside a busy state, and `/abort` and `/resume` in every state, get the interim "not yet available" reply (design, "Interim replies"); a test covers it, with no scenario.
+- [x] 1.8 Write `commands/handle.ts` and `commands/status.ts`; fold `approve()` into the `/approve` branch. Until the later M3.5 changes land, `/revise` and `/question` outside a busy state, and `/abort` and `/resume` in every state, get the interim "not yet available" reply (design, "Interim replies"); a test covers it, with no scenario.
 
 ### Worker and local CLI
 
-- [ ] 1.9 Failing worker tests: `command --issue <n> --comment <id>` runs the handler and exits 0; `command` without `--comment` exits 2; `approve` is now an unknown state; a crash posts the fixed "did not go through" reply and exits 1. No new scenario; Command task checks the comment's author and issue (worker half: exit 2).
-- [ ] 1.10 Write the `command` entry in `factory/worker` and remove `approve` and `APPROVE_FAILED_COMMENT`.
-- [ ] 1.11 Failing CLI tests with a `FakeForge` and the local ledger. Scenarios:
+- [x] 1.9 Failing worker tests: `command --issue <n> --comment <id>` runs the handler and exits 0; `command` without `--comment` exits 2; `approve` is now an unknown state; a crash posts the fixed "did not go through" reply and exits 1. No new scenario; Command task checks the comment's author and issue (worker half: exit 2).
+- [x] 1.10 Write the `command` entry in `factory/worker` and remove `approve` and `APPROVE_FAILED_COMMENT`.
+- [x] 1.11 Failing CLI tests with a `FakeForge` and the local ledger. Scenarios:
   - Local command answers on the issue
   - Local approval by command
-- [ ] 1.12 Write `pnpm factory command` in `factory/cli`.
+- [x] 1.12 Write `pnpm factory command` in `factory/cli`.
 
 ## Step 2: Network and data stack
 

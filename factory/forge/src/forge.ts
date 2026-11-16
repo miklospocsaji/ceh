@@ -12,6 +12,16 @@ export interface Issue {
   url: string;
 }
 
+/** A comment on an issue, read by its id. */
+export interface IssueComment {
+  id: number;
+  issueNumber: number;
+  /** The author's login. */
+  author: string;
+  body: string;
+  createdAt: Date;
+}
+
 export interface CreatedBranch {
   /** False when the branch already existed and was left as it was. */
   created: boolean;
@@ -43,6 +53,8 @@ export interface Forge {
   /** Rejects with a `not-found` ForgeError when there is no such issue. */
   getIssue(issueNumber: number): Promise<Issue>;
   comment(issueNumber: number, body: string): Promise<void>;
+  /** Rejects with a `not-found` ForgeError when there is no such comment. */
+  getComment(commentId: number): Promise<IssueComment>;
   branchExists(branch: string): Promise<boolean>;
   /** Creates the branch at the default branch's head; a no-op if the branch exists. */
   createBranch(branch: string): Promise<CreatedBranch>;

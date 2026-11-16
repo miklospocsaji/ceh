@@ -11,9 +11,14 @@
  * - The cloud states (add-cloud-proposal-run): `intake --execution` ends with exit 4 for an
  *   issue whose work item belongs to another execution. `await-approval` stores the task token
  *   and posts the summary; any error in it fails the paused task with SendTaskFailure, since
- *   Step Functions does not watch that task. `approve` resumes the execution, and any failure in
- *   it is said on the issue, so the owner can repeat it. `approved` records it and routes on the
+ *   Step Functions does not watch that task. `approved` records the approval and routes on the
  *   complexity, and `escalate` marks the work item after an infrastructure failure.
+ * - `command --issue <n> --comment <id>` (add-owner-commands): one owner command, which the
+ *   webhook starts with the comment's id only. The handler reads the comment, checks its author and
+ *   issue (exit 2 if either is wrong), decides it by the work item's state and replies once; an
+ *   `/approve` resumes the execution with the approval's token. It exits 0 whatever the command's
+ *   outcome, and 1 when resuming failed (the reply says so) or anything else failed, after posting
+ *   a fixed reply, so the owner is never left without an answer.
  * - The states after Proposal (add-build-loop): `design`, `plan` (a waitForTaskToken task that
  *   resumes the execution with the change id and the unfinished task ids), `step --task <id>`,
  *   which prepares the task's next build in the artifact store, and `open-pr`. Each clones afresh.
@@ -27,6 +32,10 @@ import {
   approved,
   awaitApproval,
   changeFileReader,
+  CommandFailed,
+  commandFailedReply,
+  handleCommand,
+  InvalidCommand,
   design,
   ensureWorktree,
   escalateWorkItem,
@@ -58,10 +67,6 @@ export const PLAN_FAILURE = { error: "factory.PlanFailed", cause: "The plan work
 
 /** The states the state machine runs as waitForTaskToken tasks, and what they report on failure. */
 const TOKEN_STATES: Partial<Record<WorkerState, { error: string; cause: string }>> = { "await-approval": AWAIT_APPROVAL_FAILURE, plan: PLAN_FAILURE };
-
-/** What a failed `approve` says on the issue: fixed text, so no error's message reaches GitHub. */
-export const APPROVE_FAILED_COMMENT =
-  "Your `/approve` did not go through: the factory failed while handling it, and the work item still awaits your approval. Reply `/approve` again to retry.";
 
 export type WorkerIdentity = GitIdentity;
 
@@ -128,7 +133,7 @@ export async function runWorker(argv: string[], deps: WorkerDeps): Promise<numbe
     await migrate(deps.db);
     code = await runState(args, deps, token);
   } catch (error) {
-    if (error instanceof InvalidInput || error instanceof NotApplicable) {
+    if (error instanceof InvalidInput || error instanceof NotApplicable || error instanceof InvalidCommand) {
       deps.err(`factory-worker: ${error.message}\n`);
       code = WORKER_EXIT.invalid;
     } else {
@@ -174,36 +179,8 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       deps.out(`factory-worker: await-approval for ${issue}: work item ${workItem.changeId} awaits the owner's ${kind} approval\n`);
       return WORKER_EXIT.ok;
     }
-    case "approve": {
-      let outcome;
-      try {
-        outcome = await approve({ db, forge, target, taskTokens: requireTaskTokens(deps) }, issueNumber, args.by ?? "");
-      } catch (error) {
-        // M2's exit run: a failed approve left the owner with no answer. Fixed text only.
-        await forge.comment(issueNumber, APPROVE_FAILED_COMMENT).catch((commentError: unknown) => {
-          deps.err(`factory-worker: approve for ${issue}: commenting on the failure failed: ${commentError instanceof Error ? commentError.message : String(commentError)}\n`);
-        });
-        throw error;
-      }
-      switch (outcome.kind) {
-        case "resumed":
-          if (outcome.commentError !== undefined) {
-            const message = outcome.commentError instanceof Error ? outcome.commentError.message : "unknown error";
-            deps.err(`factory-worker: approve for ${issue}: the confirmation comment failed: ${message}\n`);
-          }
-          deps.out(`factory-worker: approve for ${issue}: the ${outcome.approval} approval of work item ${outcome.workItem.changeId} resumed the execution\n`);
-          return WORKER_EXIT.ok;
-        case "nothing-awaits":
-          deps.out(`factory-worker: approve for ${issue}: nothing awaits approval\n`);
-          return WORKER_EXIT.ok;
-        case "resume-failed": {
-          const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-          deps.err(`factory-worker: approve for ${issue}: resuming work item ${outcome.workItem.changeId} failed: ${message}\n`);
-          return WORKER_EXIT.error;
-        }
-      }
-      break;
-    }
+    case "command":
+      return runCommand(args, deps);
     case "approved": {
       const transition = await approved({ db, forge, target, readChangeFile: (item, path) => readChangeFile(item, path, deps) }, await requireWorkItem(deps, issueNumber));
       const code = report(state, issueNumber, transition, deps);
@@ -234,6 +211,39 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       return WORKER_EXIT.ok;
     }
   }
+}
+
+/** One owner command; see the module comment for its exit codes. */
+async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
+  const { issueNumber, commentId } = args;
+  if (commentId === undefined) throw new InvalidInput("command needs --comment");
+  const { db, forge, target } = deps;
+  const subject = `command for issue #${String(issueNumber)}, comment ${String(commentId)}`;
+  let outcome;
+  try {
+    outcome = await handleCommand({ db, forge, target, approve: (workItem, by) => approve({ db, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by) }, issueNumber, commentId);
+  } catch (error) {
+    if (error instanceof InvalidCommand) throw error;
+    // Fixed text only: no error's message reaches GitHub.
+    const written = error instanceof CommandFailed ? error.command.written : undefined;
+    await forge.comment(issueNumber, commandFailedReply(written)).catch((commentError: unknown) => {
+      deps.err(`factory-worker: ${subject}: replying to the failure failed: ${messageOf(commentError)}\n`);
+    });
+    throw error;
+  }
+  const command = `/${outcome.command.written}`;
+  const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId} in ${outcome.workItem.state}`;
+  if (outcome.commentError !== undefined) deps.err(`factory-worker: ${subject}: the confirmation comment failed: ${messageOf(outcome.commentError)}\n`);
+  if (outcome.error !== undefined) {
+    deps.err(`factory-worker: ${subject}: ${command} could not resume ${workItem}: ${messageOf(outcome.error)}\n`);
+    return WORKER_EXIT.error;
+  }
+  deps.out(`factory-worker: ${subject}: ${command} ${outcome.outcome} (${workItem})\n`);
+  return WORKER_EXIT.ok;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function committer(deps: WorkerDeps): { committer?: WorkerIdentity } {

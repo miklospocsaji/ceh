@@ -197,6 +197,7 @@ describeForgeContract("GitHubForge with a GitHub App token provider", () => {
     defaultSha: DEFAULT_SHA,
     otherSha: "1111111111111111111111111111111111111111",
     addIssue: (i) => api.issues.set(i.number, i),
+    addComment: (c) => api.issueComments.set(c.id, { ...c, createdAt: "2026-11-16T20:00:00Z" }),
     setBranch: (branch, sha) => api.branches.set(branch, sha),
     comments: (n) => api.comments.get(n) ?? [],
     branchSha: (branch) => api.branches.get(branch),

@@ -11,7 +11,7 @@ import { execFile } from "node:child_process";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { Octokit } from "@octokit/rest";
-import { ForgeError, type CreatedBranch, type Forge, type ForgeErrorKind, type Issue, type NewPullRequest, type PullRequest, type PushBranchOptions } from "./forge.ts";
+import { ForgeError, type CreatedBranch, type Forge, type ForgeErrorKind, type Issue, type IssueComment, type NewPullRequest, type PullRequest, type PushBranchOptions } from "./forge.ts";
 import type { TokenProvider } from "./github-app.ts";
 
 /** Runs git; GitHubForge uses it only to push. */
@@ -119,6 +119,16 @@ export class GitHubForge implements Forge {
     await this.#call(`commenting on issue #${String(issueNumber)}`, () =>
       this.#octokit.rest.issues.createComment({ owner: this.#owner, repo: this.#repo, issue_number: issueNumber, body }),
     );
+  }
+
+  /** The issue comments endpoint serves comments on pull requests too; its `issue_url` names the issue or pull request. */
+  async getComment(commentId: number): Promise<IssueComment> {
+    const { data } = await this.#call(`reading comment ${String(commentId)}`, () =>
+      this.#octokit.rest.issues.getComment({ owner: this.#owner, repo: this.#repo, comment_id: commentId }),
+    );
+    const issueNumber = Number(/\/issues\/(\d+)$/.exec(data.issue_url)?.[1]);
+    if (!Number.isSafeInteger(issueNumber)) throw new ForgeError(`comment ${String(commentId)} names no issue`, "failed");
+    return { id: data.id, issueNumber, author: data.user?.login ?? "", body: data.body ?? "", createdAt: new Date(data.created_at) };
   }
 
   async branchExists(branch: string): Promise<boolean> {

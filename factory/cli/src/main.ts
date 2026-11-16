@@ -4,7 +4,7 @@
  *   `CLAUDE_CODE_OAUTH_TOKEN` (ADR 0006) and optionally `FACTORY_DATABASE_URL`. Variables already
  *   set win.
  * - The ledger is the Postgres at `FACTORY_DATABASE_URL`, migrated once the command line is valid.
- * - The target comes from `targets/` (`--target`, or the only one). `run` and `approve` read the
+ * - The target comes from `targets/` (`--target`, or the only one). `run`, `approve` and `command` read the
  *   owner's token with `gh auth token`, talk to the target's repository on GitHub, and work on a
  *   clone of it under the factory home (`local-target.ts`), never on this checkout. Roles run
  *   through the Agent SDK, resolved for the target. The token is never logged.

@@ -37,6 +37,7 @@ describeForgeContract("GitHubForge", () => {
     defaultSha: DEFAULT_SHA,
     otherSha: "1111111111111111111111111111111111111111",
     addIssue: (i) => api.issues.set(i.number, i),
+    addComment: (c) => api.issueComments.set(c.id, { ...c, createdAt: "2026-11-16T20:00:00Z" }),
     setBranch: (branch, sha) => api.branches.set(branch, sha),
     comments: (n) => api.comments.get(n) ?? [],
     branchSha: (branch) => api.branches.get(branch),
@@ -135,6 +136,29 @@ describe("GitHubForge", () => {
 
     expect(error).toBeInstanceOf(ForgeError);
     expect(error).toMatchObject({ kind: "not-found" });
+  });
+
+  it("reads a comment by its id from the issue comments endpoint, taking the issue number from its issue URL", async () => {
+    const { api, forge } = setup();
+    api.issueComments.set(2_481_516_402, { id: 2_481_516_402, issueNumber: 12, author: OWNER, body: "/status", createdAt: "2026-11-16T20:00:00Z" });
+
+    const comment = await forge.getComment(2_481_516_402);
+
+    expect(api.requests.map((r) => `${r.method} ${r.path}`)).toEqual([`GET /repos/${OWNER}/${REPO}/issues/comments/2481516402`]);
+    expect(api.requests[0]?.authorization).toBe(`token ${TOKEN}`);
+    expect(comment).toEqual({ id: 2_481_516_402, issueNumber: 12, author: OWNER, body: "/status", createdAt: new Date("2026-11-16T20:00:00Z") });
+  });
+
+  it("never puts the token into a failed getComment's error", async () => {
+    const { api, forge } = setup();
+    api.intercept = () => new Response(JSON.stringify({ message: `Server Error for ${TOKEN}` }), { status: 500, headers: { "content-type": "application/json" } });
+
+    const error = await forge.getComment(7).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect(error).toMatchObject({ kind: "failed", status: 500 });
+    expect(inspect(error, { depth: Infinity, showHidden: true })).not.toContain(TOKEN);
+    expect(JSON.stringify(error)).not.toContain(TOKEN);
   });
 
   it("rejects a bad token with an unauthorized ForgeError", async () => {

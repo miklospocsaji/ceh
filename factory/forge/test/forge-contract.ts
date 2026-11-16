@@ -13,6 +13,14 @@ export interface ContractIssue {
   state: "open" | "closed";
 }
 
+/** An issue comment as the forge holds it: someone else's, read back by its id. */
+export interface ContractComment {
+  id: number;
+  issueNumber: number;
+  author: string;
+  body: string;
+}
+
 export interface ContractHarness {
   forge: Forge;
   defaultBranch: string;
@@ -21,6 +29,8 @@ export interface ContractHarness {
   otherSha: string;
   /** Seeds an issue on the forge's side. */
   addIssue(issue: ContractIssue): void;
+  /** Seeds a comment on the forge's side, as if its author had written it. */
+  addComment(comment: ContractComment): void;
   /** Seeds a branch head on the forge's side. */
   setBranch(branch: string, sha: string): void;
   /** The comments the forge holds for an issue, in order. */
@@ -100,6 +110,33 @@ export function describeForgeContract(name: string, setup: () => ContractHarness
         expect(error).toBeInstanceOf(ForgeError);
         expect(error).toMatchObject({ kind: "not-found" });
         expect(h.comments(404)).toEqual([]);
+      });
+    });
+
+    describe("getComment", () => {
+      it("returns the comment's id, issue number, author and body", async () => {
+        const h = setup();
+        h.addIssue({ number: 12, title: "Import Kindle vocab.db", body: "x", state: "open" });
+        h.addComment({ id: 2_481_516_402, issueNumber: 12, author: "miklospocsaji", body: "/approve\r\nLooks good." });
+
+        const comment = await h.forge.getComment(2_481_516_402);
+
+        expect(comment).toEqual({
+          id: 2_481_516_402,
+          issueNumber: 12,
+          author: "miklospocsaji",
+          body: "/approve\r\nLooks good.",
+          createdAt: expect.any(Date) as unknown,
+        });
+      });
+
+      it("rejects a missing comment with a not-found ForgeError", async () => {
+        const h = setup();
+
+        const error = await h.forge.getComment(404).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(ForgeError);
+        expect(error).toMatchObject({ kind: "not-found" });
       });
     });
 

@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { ProposalResult } from "@ceh/factory-artifacts";
 import { closeApproval, findOpenApproval, findWorkItemByIssue, listTasks, setWorkItemState, type WorkItemRow } from "@ceh/factory-ledger";
 import type { PlanPaths, Role } from "@ceh/factory-roles";
-import { approved } from "./approval.ts";
+import { approved, type Approver } from "./approval.ts";
 import type { ArtifactStore, RunBuild } from "./build-io.ts";
 import { design } from "./design.ts";
 import { changeFileReader, factoryHome, worktreePath } from "./git.ts";
@@ -61,26 +61,49 @@ export type LocalApproveOutcome =
   | { kind: "nothing-awaits"; workItem: WorkItemRow | undefined }
   | { kind: "escalated"; workItem: WorkItemRow; reason: string };
 
+/** What the local approval needs: a local run's context, without its build loop. */
+export type LocalApproveContext = Omit<RunContext, "runBuild" | "store">;
+
 /**
- * `pnpm factory approve --issue <n>`: the owner's approval of a local run. The proposal is
- * approved through the `approved` handler, which comments and routes; a `large` change's design
- * goes to Plan with a comment. An approval row, if one is open, is closed.
+ * The owner's approval of a local run, which has no task token: `pnpm factory approve --issue <n>`
+ * (by `local`), and an `/approve` through `pnpm factory command` (by the owner's login). The
+ * proposal is approved through the `approved` handler, which comments and routes; a `large`
+ * change's design goes to Plan with a comment. An approval row, if one is open, is closed by `by`.
  */
-export async function approveLocally(ctx: Omit<RunContext, "runBuild" | "store">, issueNumber: number): Promise<LocalApproveOutcome> {
+export async function approveLocally(ctx: LocalApproveContext, issueNumber: number, by = "local"): Promise<LocalApproveOutcome> {
   const workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, issueNumber);
   if (workItem?.state === "awaiting-proposal-approval") {
-    if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, "local");
+    if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, by);
     const transition = await approved({ ...ctx, readChangeFile: readChangeFile(ctx) }, workItem);
     if (transition.kind === "escalate") return { kind: "escalated", workItem: transition.workItem, reason: transition.reason };
     if (transition.kind !== "advance") throw new Error(`approving ${workItem.changeId} ended with ${transition.kind}`);
     return { kind: "approved", approval: "proposal", workItem: transition.workItem };
   }
   if (workItem?.state === "awaiting-design-approval") {
-    if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, "local");
+    if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, by);
     await ctx.forge.comment(workItem.issueNumber, `The design of \`${workItem.changeId}\` is approved. The work item is now \`plan\`.`);
     return { kind: "approved", approval: "design", workItem: await setWorkItemState(ctx.db, workItem.id, "plan") };
   }
   return { kind: "nothing-awaits", workItem };
+}
+
+/**
+ * `approveLocally` as the command handler's `/approve`, for `pnpm factory command`. Every outcome
+ * has had its reply posted by then: Approved's confirmation, the design's, or an escalation.
+ */
+export function localApprover(ctx: LocalApproveContext): Approver {
+  return async (workItem, by) => {
+    const outcome = await approveLocally(ctx, workItem.issueNumber, by);
+    switch (outcome.kind) {
+      case "approved":
+        return { kind: "resumed", workItem: outcome.workItem, approval: outcome.approval };
+      case "escalated":
+        // Taking the approval escalated the work item (an unknown complexity); Approved said why.
+        return { kind: "resumed", workItem: outcome.workItem, approval: "proposal" };
+      case "nothing-awaits":
+        return { kind: "nothing-awaits", workItem };
+    }
+  };
 }
 
 function readChangeFile(ctx: Pick<RunContext, "repo" | "home">) {

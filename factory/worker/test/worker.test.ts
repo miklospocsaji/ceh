@@ -335,6 +335,10 @@ describe("factory-worker input", () => {
     ["--task for a state other than step", ["plan", "--issue", "12", "--task", "1.1"]],
     ["an invalid task id", ["step", "--issue", "12", "--task", "1.1; rm -rf /"]],
     ["an unknown approval kind", ["await-approval", "--issue", "12", "--kind", "release"]],
+    ["command without --comment", ["command", "--issue", "12"]],
+    ["a comment id that is not a number", ["command", "--issue", "12", "--comment", "12abc"]],
+    ["--comment for a state other than command", ["intake", "--issue", "12", "--comment", "5"]],
+    ["the approve state, which command replaced", ["approve", "--issue", "12", "--by", "miklospocsaji"]],
   ])("refuses %s with exit 2 and a usage message", async (_label, argv) => {
     const w = worker();
 
@@ -376,7 +380,13 @@ const OWNER = "miklospocsaji";
 
 const cloudIntake = (arn = EXECUTION) => ["intake", "--issue", String(ISSUE.number), "--execution", arn];
 const awaitApproval = (n = ISSUE.number) => ["await-approval", "--issue", String(n)];
-const approve = (n = ISSUE.number, by = OWNER) => ["approve", "--issue", String(n), "--by", by];
+/** Seeds the comment on the issue, as its author would write it, and returns the `command` task's arguments for it. */
+function commandFor(body: string, n = ISSUE.number, author = OWNER): string[] {
+  const { id } = forge.addComment({ issueNumber: n, author, body });
+  return ["command", "--issue", String(n), "--comment", String(id)];
+}
+/** The owner's `/approve`, handled by a `command` task. */
+const approve = (n = ISSUE.number) => commandFor("/approve", n);
 const approved = (n = ISSUE.number) => ["approved", "--issue", String(n)];
 const escalate = (reason: string, n = ISSUE.number) => ["escalate", "--issue", String(n), "--reason", reason];
 
@@ -586,31 +596,22 @@ describe("factory-worker approve and approved", () => {
 
   it("Scenario: Approval with nothing awaiting is answered", async () => {
     const w = worker();
-    expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
+    await awaiting(w);
+    expect((await w.run(approve())).code).toBe(WORKER_EXIT.ok);
+    const comments = forge.comments.length;
 
+    // A second /approve before Approved runs: the work item is still awaiting by its state, but its approval is closed.
     expect((await w.run(approve())).code).toBe(WORKER_EXIT.ok);
 
-    expect(taskTokens.successes).toEqual([]);
-    expect(forge.comments).toHaveLength(1);
-    expect(forge.comments[0]?.body).toMatch(/nothing awaits approval/i);
-    expect(forge.comments[0]?.body).toContain("`proposal`");
-    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("proposal");
+    expect(taskTokens.successes).toHaveLength(1);
+    expect(forge.comments).toHaveLength(comments + 1);
+    expect(forge.comments.at(-1)?.body).toMatch(/nothing awaits approval/i);
+    expect(forge.comments.at(-1)?.body).toContain("`awaiting-proposal-approval`");
 
     // An issue without a work item gets an answer too.
     expect((await w.run(approve(EMPTY_ISSUE.number))).code).toBe(WORKER_EXIT.ok);
     expect(forge.comments.at(-1)).toMatchObject({ issueNumber: EMPTY_ISSUE.number, body: expect.stringMatching(/nothing awaits approval/i) as unknown });
-    expect(taskTokens.successes).toEqual([]);
-  });
-
-  it("answers a second /approve after the first resumed the execution, without resuming it again", async () => {
-    const w = worker();
-    await awaiting(w);
-    expect((await w.run(approve())).code).toBe(WORKER_EXIT.ok);
-
-    expect((await w.run(approve())).code).toBe(WORKER_EXIT.ok);
-
     expect(taskTokens.successes).toHaveLength(1);
-    expect(forge.comments.at(-1)?.body).toMatch(/nothing awaits approval/i);
   });
 
   it("Scenario: Failed resume is reported on the issue", async () => {
@@ -637,7 +638,7 @@ describe("factory-worker approve and approved", () => {
     expect(taskTokens.successes.map((success) => success.taskToken)).toEqual([TOKEN]);
   });
 
-  it("comments on the issue when the approve task fails before it can resume, leaving the approval open", async () => {
+  it("comments on the issue when the command task fails before it can resume, leaving the approval open", async () => {
     const w = worker();
     await awaiting(w);
     const comments = forge.comments.length;
@@ -664,16 +665,86 @@ describe("factory-worker approve and approved", () => {
     expect(body).not.toMatch(/hunter2|Connection terminated/);
   });
 
-  it("refuses approve without the approver's login, and approved for a work item not awaiting approval", async () => {
+  it("refuses command without its comment, the approve state, and approved for a work item not awaiting approval", async () => {
     const w = worker();
     expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
 
-    expect((await w.run(["approve", "--issue", String(ISSUE.number)])).code).toBe(WORKER_EXIT.invalid);
-    expect((await w.run(approve(ISSUE.number, "not a login"))).code).toBe(WORKER_EXIT.invalid);
+    expect((await w.run(["command", "--issue", String(ISSUE.number)])).code).toBe(WORKER_EXIT.invalid);
+    expect((await w.run(["approve", "--issue", String(ISSUE.number), "--by", OWNER])).code).toBe(WORKER_EXIT.invalid);
     expect((await w.run(approved())).code).toBe(WORKER_EXIT.invalid);
 
     expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("proposal");
     expect(forge.comments).toEqual([]);
+  });
+});
+
+describe("factory-worker command", () => {
+  it("runs the command handler for the comment and exits 0", async () => {
+    const w = worker();
+    expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
+
+    const { code, out } = await w.run(commandFor("/status"));
+
+    expect(code).toBe(WORKER_EXIT.ok);
+    expect(forge.comments).toHaveLength(1);
+    expect(forge.comments[0]).toMatchObject({ issueNumber: ISSUE.number, body: expect.stringContaining("`proposal`") as unknown });
+    expect(out).toContain("/status");
+  });
+
+  it("exits 0 whatever the command's outcome: busy, refused or unknown", async () => {
+    const w = worker();
+    expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
+
+    expect((await w.run(commandFor("/approve"))).code).toBe(WORKER_EXIT.ok);
+    expect((await w.run(commandFor("/abort"))).code).toBe(WORKER_EXIT.ok);
+    expect((await w.run(commandFor("/aprove"))).code).toBe(WORKER_EXIT.ok);
+
+    expect(forge.comments).toHaveLength(3);
+    expect(taskTokens.successes).toEqual([]);
+  });
+
+  it("Scenario: Command task checks the comment's author and issue", async () => {
+    const w = worker();
+    await awaiting(w);
+    const comments = forge.comments.length;
+
+    const stranger = await w.run(commandFor("/approve", ISSUE.number, "someone-else"));
+    const otherIssue = commandFor("/approve", EMPTY_ISSUE.number);
+    otherIssue[2] = String(ISSUE.number);
+    const misplaced = await w.run(otherIssue);
+
+    expect(stranger.code).toBe(WORKER_EXIT.invalid);
+    expect(misplaced.code).toBe(WORKER_EXIT.invalid);
+    expect(forge.comments).toHaveLength(comments);
+    expect(taskTokens.successes).toEqual([]);
+    expect(await approvals()).toEqual([expect.objectContaining({ state: "open", resolvedBy: null })]);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("awaiting-proposal-approval");
+  });
+
+  it("refuses a comment the forge does not have with exit 2, replying nothing", async () => {
+    const w = worker();
+    expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
+
+    const { code } = await w.run(["command", "--issue", String(ISSUE.number), "--comment", "404"]);
+
+    expect(code).toBe(WORKER_EXIT.invalid);
+    expect(forge.comments).toEqual([]);
+  });
+
+  it("posts the fixed reply and exits 1 when reading the comment fails", async () => {
+    const w = worker();
+    expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
+    const argv = commandFor("/status");
+    vi.spyOn(forge, "getComment").mockRejectedValue(new ForgeError("GitHub: reading comment 7 failed: 502 Bad Gateway", "failed", 502));
+
+    const { code, err } = await w.run(argv);
+    vi.restoreAllMocks();
+
+    expect(code).toBe(WORKER_EXIT.error);
+    expect(err).toContain("502 Bad Gateway");
+    expect(forge.comments).toHaveLength(1);
+    expect(forge.comments[0]?.body).toMatch(/did not go through: the factory failed while handling it\. Send it again\./);
+    expect(forge.comments[0]?.body).not.toContain("502");
   });
 });
 

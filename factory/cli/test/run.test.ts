@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { FakeForge } from "@ceh/factory-forge/testing";
-import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, setWorkItemState } from "@ceh/factory-ledger";
+import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, openApproval, setWorkItemState } from "@ceh/factory-ledger";
 import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
 import { loadRole, type PlanPaths, type Role } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -431,6 +431,82 @@ describe("factory run, after Proposal", { timeout: 60_000 }, () => {
     expect(err).toContain("proposal-approved");
     expect(forge.comments).toHaveLength(comments);
     expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("proposal-approved");
+  });
+});
+
+/** Seeds the comment on the issue, as its author would write it, and returns the `command` arguments for it. */
+function commandFor(body: string, author: string = TARGET.owner): string[] {
+  const { id } = forge.addComment({ issueNumber: ISSUE.number, author, body });
+  return ["command", "--issue", String(ISSUE.number), "--comment", String(id)];
+}
+
+describe("factory command", { timeout: 60_000 }, () => {
+  it("Scenario: Local command answers on the issue", async () => {
+    const factory = cli();
+    expect((await factory.run(RUN, [VALID])).code).toBe(EXIT_CODES.ok);
+    const comments = forge.comments.length;
+
+    const { code, out } = await factory.run(commandFor("/status"));
+
+    expect(code).toBe(EXIT_CODES.ok);
+    expect(forge.comments).toHaveLength(comments + 1);
+    expect(forge.comments.at(-1)?.issueNumber).toBe(ISSUE.number);
+    expect(forge.comments.at(-1)?.body).toContain(CHANGE_ID);
+    expect(forge.comments.at(-1)?.body).toContain("`awaiting-proposal-approval`");
+    expect(out).toContain("/status");
+    expect(out).toContain("applied");
+    expect(factory.calls.map((call) => call.role)).toEqual(["proposal-author"]);
+  });
+
+  it("Scenario: Local approval by command", async () => {
+    const factory = cli();
+    expect((await factory.run(RUN, [VALID])).code).toBe(EXIT_CODES.ok);
+    const workItem = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
+    // A local run opens no approval row; one left open (by an earlier cloud run, say) is closed by the owner.
+    await openApproval(db.pool, { workItemId: workItem?.id ?? "", taskToken: "AQB8AAAAKgAAAAMAAAAAAAAAAeTaskToken" });
+    const comments = forge.comments.length;
+
+    const { code } = await factory.run(commandFor("/approve"));
+
+    expect(code).toBe(EXIT_CODES.ok);
+    const { rows } = await db.pool.query<{ state: string; resolved_by: string | null }>("SELECT state, resolved_by FROM approvals WHERE work_item_id = $1", [workItem?.id]);
+    expect(rows).toEqual([{ state: "closed", resolved_by: TARGET.owner }]);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("proposal-approved");
+    // One reply: Approved's confirmation.
+    expect(forge.comments).toHaveLength(comments + 1);
+    expect(forge.comments.at(-1)?.body).toMatch(/\bproposal\b.*\bapproved\b/i);
+
+    // pnpm factory run goes on from there.
+    const next = await factory.run(until("plan"), [PLANNER]);
+
+    expect(next.code).toBe(EXIT_CODES.ok);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("build");
+    expect(factory.calls.map((call) => call.role)).toEqual(["proposal-author", "planner"]);
+  });
+
+  it("refuses another user's comment with exit 1, replying nothing and changing nothing", async () => {
+    const factory = cli();
+    expect((await factory.run(RUN, [VALID])).code).toBe(EXIT_CODES.ok);
+    const comments = forge.comments.length;
+
+    const { code, err } = await factory.run(commandFor("/approve", "someone-else"));
+
+    expect(code).toBe(EXIT_CODES.failed);
+    expect(err).toContain("someone-else");
+    expect(forge.comments).toHaveLength(comments);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("awaiting-proposal-approval");
+  });
+
+  it.each([
+    ["no --comment", ["command", "--issue", "12"]],
+    ["a comment id that is not a number", ["command", "--issue", "12", "--comment", "x1"]],
+    ["--comment on run", ["run", "--issue", "12", "--until", "proposal", "--comment", "5"]],
+  ])("is a usage error with %s", async (_label, argv) => {
+    const { code, err } = await cli().run(argv);
+
+    expect(code).toBe(EXIT_CODES.usage);
+    expect(err).toContain("pnpm factory command --issue <n> --comment <id>");
+    expect(forge.comments).toEqual([]);
   });
 });
 
