@@ -119,7 +119,7 @@ describe("factory stack: target", () => {
   };
 
   it("Scenario: Stack settings come from the target config", () => {
-    // The webhook accepts the target's repository and the target's owner.
+    // The webhook accepts the target's repository and only the target's owner's commands.
     const variables = (props("AWS::Lambda::Function").find((fn) => JSON.stringify(fn).includes(WEBHOOK_ENV.stateMachineArn))?.["Environment"] as { Variables: Record<string, unknown> }).Variables;
     expect(variables[WEBHOOK_ENV.repository]).toBe("miklospocsaji/vocab");
     expect(variables[WEBHOOK_ENV.owner]).toBe("miklospocsaji");
@@ -598,6 +598,42 @@ describe("factory stack: webhook Lambda", () => {
     for (const statement of statements) expect(statement.Resource).not.toContain("*");
     expect(JSON.stringify(resources[role]?.Properties?.["ManagedPolicyArns"] ?? [])).toContain("AWSLambdaBasicExecutionRole");
     expect((resources[role]?.Properties?.["ManagedPolicyArns"] as unknown[] | undefined) ?? []).toHaveLength(1);
+  });
+});
+
+/**
+ * The modules the webhook's bundle is built from: its entry and every module it imports for a
+ * value, followed through relative imports. Type-only imports are erased (verbatimModuleSyntax),
+ * so they put nothing in the bundle and are not followed.
+ */
+function webhookBundleImports(): { files: string[]; packages: string[] } {
+  const files = new Set<string>();
+  const packages = new Set<string>();
+  const visit = (file: string): void => {
+    if (files.has(file)) return;
+    files.add(file);
+    const source = readFileSync(file, "utf8");
+    const statements = source.match(/^(?:import|export)\s[^;]*?\sfrom\s+"[^"]+";|^import\s+"[^"]+";/gms) ?? [];
+    for (const statement of statements) {
+      if (/^(?:import|export)\s+type\s/.test(statement)) continue;
+      const specifier = /"([^"]+)";$/.exec(statement)?.[1] ?? "";
+      if (specifier.startsWith(".")) visit(join(file, "..", specifier));
+      else packages.add(specifier);
+    }
+  };
+  visit(join(REPO_ROOT, "factory/orchestrator/src/lambda/webhook.ts"));
+  return { files: [...files].map((file) => relative(REPO_ROOT, file)).sort(), packages: [...packages].sort() };
+}
+
+describe("factory stack: webhook bundle", () => {
+  it("holds the command parser and nothing that reaches the ledger or GitHub", () => {
+    const { files, packages } = webhookBundleImports();
+
+    // It decides what is a command with the worker's own parser.
+    expect(files).toContain("factory/orchestrator/src/commands/parse.ts");
+    // Only the AWS SDK clients it calls and Node's crypto: no pg, no ledger, no forge, no GitHub token.
+    expect(packages).toEqual(["@aws-sdk/client-ecs", "@aws-sdk/client-sfn", "@aws-sdk/client-ssm", "node:crypto"]);
+    expect(files.filter((file) => !file.startsWith("factory/orchestrator/src/"))).toEqual([]);
   });
 });
 

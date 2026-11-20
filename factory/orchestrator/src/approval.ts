@@ -23,6 +23,7 @@ import {
   setWorkItemState,
   type ApprovalKind,
   type AuthMode,
+  type Db,
   type WorkItemRow,
 } from "@ceh/factory-ledger";
 import { readComplexity } from "./change-files.ts";
@@ -106,8 +107,11 @@ export type ApproveOutcome =
   | { kind: "nothing-awaits"; workItem: WorkItemRow }
   | { kind: "resume-failed"; workItem: WorkItemRow; approval: ApprovalKind; error: unknown };
 
-/** Applies the owner's `/approve` to a work item awaiting approval; `by` is the owner's login. */
-export type Approver = (workItem: WorkItemRow, by: string) => Promise<ApproveOutcome>;
+/**
+ * Applies the owner's `/approve` to a work item awaiting approval; `by` is the owner's login. It
+ * writes through `db`: the command handler's transaction, which holds the work item's lock.
+ */
+export type Approver = (workItem: WorkItemRow, by: string, db: Db) => Promise<ApproveOutcome>;
 
 export interface ApproveContext extends HandlerContext {
   taskTokens: TaskTokens;
@@ -148,7 +152,7 @@ export async function approve(ctx: ApproveContext, workItem: WorkItemRow, by: st
 
 /** `approve` with Step Functions, as the `command` worker task applies it. */
 export function cloudApprover(ctx: ApproveContext): Approver {
-  return (workItem, by) => approve(ctx, workItem, by);
+  return (workItem, by, db) => approve({ ...ctx, db }, workItem, by);
 }
 
 export interface ApprovedContext extends HandlerContext {

@@ -343,7 +343,7 @@ export class FactoryStack extends Stack {
       role: stateMachineRole,
     });
 
-    // The webhook: outside the VPC, no ledger; it starts executions and approve tasks only.
+    // The webhook: outside the VPC, no ledger; it starts executions and `command` tasks only (ADR 0015).
     this.webhook = new NodejsFunction(this, "Webhook", {
       entry: resolve(REPO_ROOT, WEBHOOK_ENTRY),
       handler: "handler",

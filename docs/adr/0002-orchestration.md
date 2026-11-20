@@ -1,6 +1,6 @@
 # 0002 Orchestration
 
-Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task) and 2026-11-13 (the build loop)
+Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop) and 2026-11-20 (owner commands)
 
 ## Context
 
@@ -48,3 +48,11 @@ M3 (add-build-loop) runs the work item past Proposal approval to a pull request.
 - **Failures leave the Map as errors.** A step's design flaw ends the item with `DesignFlaw`, which the Map catches into Design, so the change is designed and planned again; the worker escalates a third flaw. An escalated step ends it with `WorkItemEscalated`, caught into Escalated. A step that crashes past its retries or refuses its input ends it with `WorkerFailed` or `WorkerRefused`, caught into Escalate with that reason. Retries inside the Map count in a variable of their own, `$itemTries`, since a Map's states may not assign a variable of the outer scope.
 - **States pass only pointers:** the issue number, the change id, task ids, exit codes and task tokens. The change id names the work item's branch and store prefix and holds no artifact, so it is a pointer like the issue number.
 - After the Map, `open-pr` opens the pull request and the execution succeeds. The pull request waits for the owner; nothing in the state machine merges.
+
+## Amendment 2026-11-20: owner commands resume executions through the `command` task
+
+M3.5 (add-owner-commands, ADR 0015) replaces the `approve` worker task:
+- **The webhook starts `factory-worker command --issue <n> --comment <comment id>`** for every owner command, `/approve` included. It passes the comment's id only, and still has no ledger and no GitHub token. Its role is unchanged: start this state machine, run the worker family, pass the worker's roles, read the webhook secret.
+- **`/approve` resumes the execution from the `command` task,** with the open approval's token, as `approve` did: the approval is closed, `SendTaskSuccess` is called, and the approval is reopened if that fails. The task decides under a lock on the work item's ledger row, so two approvals at once send the token once.
+- **The state machine does not change.** An execution paused in AwaitApproval or AwaitDesignApproval names no `approve` task, so one paused across the deploy is approved through `command` afterwards.
+- The later M3.5 changes add `/revise` (a decision through the same token) and `/abort` and `/resume` (stopping and starting executions from the `command` task).

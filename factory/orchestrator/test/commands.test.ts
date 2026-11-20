@@ -86,7 +86,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks");
+  await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks CASCADE");
 });
 
 function context(): CommandContext {
@@ -481,7 +481,7 @@ describe("/status", () => {
       proposal: /nothing waits for you/i,
     };
     for (const [state, expected] of Object.entries(waits)) {
-      await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks");
+      await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks CASCADE");
       forge.comments.length = 0;
       await workItemIn(state);
 

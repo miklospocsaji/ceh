@@ -221,7 +221,7 @@ async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
   const subject = `command for issue #${String(issueNumber)}, comment ${String(commentId)}`;
   let outcome;
   try {
-    outcome = await handleCommand({ db, forge, target, approve: (workItem, by) => approve({ db, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by) }, issueNumber, commentId);
+    outcome = await handleCommand({ db, forge, target, approve: (workItem, by, tx) => approve({ db: tx, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by) }, issueNumber, commentId);
   } catch (error) {
     if (error instanceof InvalidCommand) throw error;
     // Fixed text only: no error's message reaches GitHub.

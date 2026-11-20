@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import pg from "pg";
 import { ForgeError } from "@ceh/factory-forge";
 import { FakeForge, type FakeIssue } from "@ceh/factory-forge/testing";
 import { createWorkItem, findOpenApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, type ApprovalRow } from "@ceh/factory-ledger";
@@ -643,12 +644,13 @@ describe("factory-worker approve and approved", () => {
     await awaiting(w);
     const comments = forge.comments.length;
     // The ledger fails while closing the approval (M2's exit run: a ledger that did not answer).
-    const pool = db.pool as unknown as { query: (...args: unknown[]) => Promise<unknown> };
-    const query = pool.query.bind(pool);
-    vi.spyOn(pool, "query").mockImplementation(async (...args: unknown[]) => {
+    // Spied on every client, the pool's and the command's transaction's alike.
+    const clients = pg.Client.prototype as unknown as { query: (this: pg.Client, ...args: unknown[]) => Promise<unknown> };
+    const query = clients.query;
+    vi.spyOn(clients, "query").mockImplementation(function (this: pg.Client, ...args: unknown[]) {
       const text = typeof args[0] === "string" ? args[0] : "";
-      if (/UPDATE approvals SET state = 'closed'/.test(text)) throw new Error("Connection terminated unexpectedly, password=hunter2");
-      return query(...args);
+      if (/UPDATE approvals SET state = 'closed'/.test(text)) return Promise.reject(new Error("Connection terminated unexpectedly, password=hunter2"));
+      return query.apply(this, args);
     });
 
     const { code } = await w.run(approve());

@@ -4,9 +4,13 @@
  *
  * 1. The comment is read through the Forge. One not by the target's owner (compared ignoring
  *    case), on another issue than the task's, missing, or holding no command is InvalidCommand:
- *    nothing is done and nothing is posted. The webhook's check is the gate; this is the proof.
- * 2. The command is decided by the table below, and its effect applied.
- * 3. The one reply is posted.
+ *    nothing is recorded, done or posted. The webhook's check is the gate; this is the proof.
+ * 2. In one transaction: the issue's work item is locked (`SELECT … FOR UPDATE`), so commands on
+ *    one work item are decided one at a time; the comment is recorded, and a comment recorded
+ *    already ends here as a `duplicate`, with no effect and no reply; the command is decided by
+ *    the table below, its effect applied and its outcome recorded. No role session runs here.
+ * 3. After the commit, the one reply is posted. A crash in between leaves the command applied and
+ *    unanswered, and a redelivery does not repeat it: `/status` shows where it stands.
  *
  * | Work item state                  | /approve                      | /revise, /question | /abort, /resume   | /status, /help | unknown |
  * | none                             | refused: nothing awaits       | not yet available  | not yet available | applied        | unknown |
@@ -16,11 +20,9 @@
  * | pr-open                          | refused: the PR is open       | not yet available  | not yet available | applied        | unknown |
  *
  * The busy check comes before "not yet available", so the owner learns the more useful fact first.
- * Recording the command in the ledger and deciding under a lock on the work item's row come with
- * add-owner-commands task 2.2.
  */
 import { ForgeError, type IssueComment } from "@ceh/factory-forge";
-import { findWorkItemByIssue, type WorkItemRow } from "@ceh/factory-ledger";
+import { inTransaction, lockWorkItem, recordComment, setCommentOutcome, type CommentOutcome, type WorkItemRow } from "@ceh/factory-ledger";
 import type { Approver } from "../approval.ts";
 import type { HandlerContext } from "../handler.ts";
 import { parseCommand, type Command, type KnownVerb } from "./parse.ts";
@@ -59,9 +61,12 @@ export class CommandFailed extends Error {
   }
 }
 
-/** What the command came to, as the ledger will record it (`outcome`, task 2.2). */
+/**
+ * What the command came to: the outcome the ledger records, or `duplicate` for a comment
+ * recorded already, which changed nothing and was not answered again.
+ */
 export interface CommandOutcome {
-  outcome: "applied" | "busy" | "refused" | "unknown";
+  outcome: CommentOutcome | "duplicate";
   command: Command;
   /** The issue's work item as the command met it. */
   workItem: WorkItemRow | undefined;
@@ -77,7 +82,13 @@ const RUNNING: readonly string[] = ["intake", "proposal", "proposal-approved", "
 const BUSY_VERBS: readonly KnownVerb[] = ["approve", "revise", "question"];
 const AWAITING: readonly string[] = ["awaiting-proposal-approval", "awaiting-design-approval"];
 
-type Decision = Pick<CommandOutcome, "outcome" | "error" | "commentError"> & { reply: string | undefined };
+type Decision = Pick<CommandOutcome, "error" | "commentError"> & { outcome: CommentOutcome; reply: string | undefined };
+
+/**
+ * What a comment row holds until its decision is known, inside the transaction that records it,
+ * so no one else ever sees it.
+ */
+const UNDECIDED: CommentOutcome = "refused";
 
 export async function handleCommand(ctx: CommandContext, issueNumber: number, commentId: number): Promise<CommandOutcome> {
   const comment = await readComment(ctx, commentId);
@@ -91,8 +102,26 @@ export async function handleCommand(ctx: CommandContext, issueNumber: number, co
   if (command === undefined) throw new InvalidCommand(`comment ${String(commentId)} has no command on its first line`);
 
   try {
-    const workItem = await findWorkItemByIssue(ctx.db, ctx.target.repository, issueNumber);
-    const decision = await decide(ctx, command, workItem);
+    const decided = await inTransaction(ctx.db, async (tx) => {
+      const workItem = await lockWorkItem(tx, ctx.target.repository, issueNumber);
+      const recorded = await recordComment(tx, {
+        workItemId: workItem?.id ?? null,
+        repository: ctx.target.repository,
+        issueNumber,
+        githubCommentId: comment.id,
+        author: comment.author,
+        verb: command.written,
+        body: comment.body,
+        outcome: UNDECIDED,
+        stateMet: workItem?.state ?? null,
+      });
+      if (recorded === undefined) return { workItem, decision: undefined };
+      const decision = await decide({ ...ctx, db: tx }, command, workItem);
+      if (decision.outcome !== recorded.outcome) await setCommentOutcome(tx, recorded.id, decision.outcome);
+      return { workItem, decision };
+    });
+    const { workItem, decision } = decided;
+    if (decision === undefined) return { outcome: "duplicate", command, workItem };
     if (decision.reply !== undefined) await ctx.forge.comment(issueNumber, decision.reply);
     const { outcome, error, commentError } = decision;
     return { outcome, command, workItem, ...(error === undefined ? {} : { error }), ...(commentError === undefined ? {} : { commentError }) };
@@ -131,7 +160,7 @@ async function decideApprove(ctx: CommandContext, workItem: WorkItemRow | undefi
   if (!AWAITING.includes(workItem.state)) return { outcome: "refused", reply: nothingAwaitsReply(workItem) };
 
   // The approval is closed with the owner's login as the target spells it.
-  const result = await ctx.approve(workItem, ctx.target.owner);
+  const result = await ctx.approve(workItem, ctx.target.owner, ctx.db);
   switch (result.kind) {
     case "resumed":
       // A proposal's approval is confirmed by Approved, which the execution runs next; a design's

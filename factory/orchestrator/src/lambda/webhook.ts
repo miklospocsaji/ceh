@@ -7,14 +7,18 @@
  *   any mismatch. The secret is read from Parameter Store once per cold start and never logged.
  * - `issues.labeled` with `factory` on an open issue of this repository: one StartExecution,
  *   named `issue-<n>-<delivery id>`, with input `{ issueNumber }` only. 202.
- * - `issue_comment.created` on an issue (not a pull request) whose first line is `/approve`, by
- *   the owner: one RunTask of `approve --issue <n> --by <login>`. 202.
- * - Anything else: 204, doing nothing. A non-owner's `/approve` shows only in the log.
+ * - `issue_comment.created` on an issue (not a pull request) whose first line is a command
+ *   (`parseCommand`, the worker's own parser), by the owner: one RunTask of
+ *   `command --issue <n> --comment <comment id>` (add-owner-commands design, "Webhook"). Only the
+ *   id is passed, never the comment's text: the task reads it through the Forge. 202.
+ * - Anything else: 204, doing nothing, with no reply. A non-owner's command shows only in the
+ *   log, with the login and the verb. Edited and deleted comments are ignored.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { ECSClient, RunTaskCommand, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
 import { SFNClient, StartExecutionCommand, type StartExecutionCommandInput } from "@aws-sdk/client-sfn";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { parseCommand } from "../commands/parse.ts";
 import type { WorkerTaskConfig } from "../state-machine.ts";
 import { WEBHOOK_ENV } from "./webhook-env.ts";
 
@@ -22,7 +26,7 @@ export interface WebhookConfig {
   stateMachineArn: string;
   /** `<owner>/<repo>`: deliveries for any other repository are ignored. */
   repository: string;
-  /** The only login whose `/approve` counts (ADR 0009). */
+  /** The only login whose commands count (ADR 0009, ADR 0015). */
   owner: string;
   worker: WorkerTaskConfig;
 }
@@ -49,7 +53,6 @@ export interface FunctionUrlResult {
 }
 
 export const LABEL = "factory";
-export const APPROVE_COMMAND = "/approve";
 
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/;
 /** Step Functions execution names: at most 80 of these characters. */
@@ -128,15 +131,16 @@ export function createWebhookHandler(deps: WebhookDeps): (event: FunctionUrlEven
         log(`webhook: delivery ${deliveryId}: started execution ${name} for issue #${String(action.issueNumber)}`);
         return answer(202, "execution started");
       }
-      case "approve": {
+      case "command": {
+        const subject = `command for issue #${String(action.issueNumber)}, comment ${String(action.commentId)}`;
         try {
-          await deps.runTask(approveTask(deps.config.worker, action.issueNumber, action.login));
+          await deps.runTask(commandTask(deps.config.worker, action.issueNumber, action.commentId));
         } catch (error) {
-          log(`webhook: delivery ${deliveryId}: starting approve for issue #${String(action.issueNumber)} failed: ${errorName(error)}`);
-          return answer(502, "could not start the approval");
+          log(`webhook: delivery ${deliveryId}: starting the ${subject} failed: ${errorName(error)}`);
+          return answer(502, "could not start the command");
         }
-        log(`webhook: delivery ${deliveryId}: started approve for issue #${String(action.issueNumber)} by ${action.login}`);
-        return answer(202, "approval started");
+        log(`webhook: delivery ${deliveryId}: started the ${subject}`);
+        return answer(202, "command started");
       }
     }
   };
@@ -152,7 +156,7 @@ function signatureMatches(body: Buffer, header: string | undefined, key: string)
 
 type Action =
   | { kind: "start"; issueNumber: number }
-  | { kind: "approve"; issueNumber: number; login: string }
+  | { kind: "command"; issueNumber: number; commentId: number }
   | { kind: "ignore"; reason: string }
   | { kind: "invalid"; reason: string };
 
@@ -175,16 +179,20 @@ function route(eventName: string, payload: unknown, config: WebhookConfig): Acti
     return { kind: "start", issueNumber };
   }
 
+  // An edit is not a new command: the owner writes a new comment instead.
   if (action !== "created") return { kind: "ignore", reason: `issue_comment.${String(action)}` };
   const comment = asRecord(delivery["comment"]);
   const text = comment["body"];
-  const firstLine = typeof text === "string" ? (text.split(/\r?\n/)[0] ?? "").trim() : "";
-  if (firstLine !== APPROVE_COMMAND) return { kind: "ignore", reason: "not /approve" };
+  const command = typeof text === "string" ? parseCommand(text) : undefined;
+  if (command === undefined) return { kind: "ignore", reason: "no command on the comment's first line" };
   const login = asRecord(comment["user"])["login"];
   if (typeof login !== "string" || login.toLowerCase() !== config.owner.toLowerCase()) {
-    return { kind: "ignore", reason: `/approve from ${typeof login === "string" ? login : "an unknown user"}, who is not the owner` };
+    // The verb, cut short, and never the rest of the comment.
+    return { kind: "ignore", reason: `/${command.written.slice(0, 40)} from ${typeof login === "string" ? login : "an unknown user"}, who is not the owner` };
   }
-  return { kind: "approve", issueNumber, login: config.owner };
+  const commentId = comment["id"];
+  if (typeof commentId !== "number" || !Number.isSafeInteger(commentId) || commentId <= 0) return { kind: "invalid", reason: "no comment id" };
+  return { kind: "command", issueNumber, commentId };
 }
 
 /** `issue-<n>-<delivery id>`, kept to the characters and length Step Functions allows. */
@@ -194,13 +202,14 @@ function executionName(issueNumber: number, deliveryId: string): string {
   return `${prefix}${id}`.slice(0, NAME_LIMIT);
 }
 
-function approveTask(worker: WorkerTaskConfig, issueNumber: number, login: string): RunTaskCommandInput {
+/** The `command` worker task for one comment: its id is the only part of the comment it carries. */
+function commandTask(worker: WorkerTaskConfig, issueNumber: number, commentId: number): RunTaskCommandInput {
   return {
     cluster: worker.cluster,
     taskDefinition: worker.taskDefinition,
     launchType: "FARGATE",
     networkConfiguration: { awsvpcConfiguration: { subnets: worker.subnets, securityGroups: [worker.securityGroup], assignPublicIp: "ENABLED" } },
-    overrides: { containerOverrides: [{ name: worker.container, command: ["approve", "--issue", String(issueNumber), "--by", login] }] },
+    overrides: { containerOverrides: [{ name: worker.container, command: ["command", "--issue", String(issueNumber), "--comment", String(commentId)] }] },
   };
 }
 

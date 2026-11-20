@@ -52,19 +52,19 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
 
 No network change: the worker, the webhook and their security groups stay as they are.
 
-- [ ] 2.1 Failing tests against the local Postgres for migration 0005 and its queries. Scenarios:
+- [x] 2.1 Failing tests against the local Postgres for migration 0005 and its queries. Scenarios:
   - Command is recorded with its outcome
   - Redelivered command is applied once
   - Interventions count only commands that act
   - Two approvals at once resume the execution once (two handler calls on two connections, started together)
-- [ ] 2.2 Write `factory/ledger/migrations/0005_comments.sql`, `lockWorkItem`, `recordComment`, `listComments` and `countInterventions`.
-- [ ] 2.3 Write ADR 0015 (owner commands), following `design.md` and `docs/m3.5-owner-commands.md` sections 2 and 12, and amend ADR 0009 (issue comments read by id; no new permission or event). Add the M3.5 decisions to brief section 8.
+- [x] 2.2 Write `factory/ledger/migrations/0005_comments.sql`, `lockWorkItem`, `recordComment`, `listComments` and `countInterventions`.
+- [x] 2.3 Write ADR 0015 (owner commands), following `design.md` and `docs/m3.5-owner-commands.md` sections 2 and 12, and amend ADR 0009 (issue comments read by id; no new permission or event). Add the M3.5 decisions to brief section 8.
 
 ## Step 3: State machine and Lambdas
 
 The state machine does not change in this change; its definition tests stay green.
 
-- [ ] 3.1 Failing webhook tests, with fake Step Functions and ECS clients. Scenarios:
+- [x] 3.1 Failing webhook tests, with fake Step Functions and ECS clients. Scenarios:
   - Comment without a command is ignored
   - Command below the first line is ignored
   - Command from another user is ignored
@@ -73,8 +73,8 @@ The state machine does not change in this change; its definition tests stay gree
   - Approval from another user is ignored (carried)
 
   Also: a command on a pull request starts nothing; `issues.labeled` is unchanged.
-- [ ] 3.2 Write the route in `factory/orchestrator/src/lambda/webhook.ts`, using `parseCommand`.
-- [ ] 3.3 Failing CDK assertion tests, then any stack change they need: the webhook may still only start this state machine, run the worker family and pass its roles, and has no access to the ledger's secret. Scenario: Stack settings come from the target config (carried; its text now says commands). Amend ADR 0002 (commands resume executions through the `command` task).
+- [x] 3.2 Write the route in `factory/orchestrator/src/lambda/webhook.ts`, using `parseCommand`.
+- [x] 3.3 Failing CDK assertion tests, then any stack change they need: the webhook may still only start this state machine, run the worker family and pass its roles, and has no access to the ledger's secret. Scenario: Stack settings come from the target config (carried; its text now says commands). Amend ADR 0002 (commands resume executions through the `command` task).
 
 ## Step 4: Deploy and cloud check
 

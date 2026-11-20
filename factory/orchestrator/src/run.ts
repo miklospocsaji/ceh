@@ -92,8 +92,8 @@ export async function approveLocally(ctx: LocalApproveContext, issueNumber: numb
  * has had its reply posted by then: Approved's confirmation, the design's, or an escalation.
  */
 export function localApprover(ctx: LocalApproveContext): Approver {
-  return async (workItem, by) => {
-    const outcome = await approveLocally(ctx, workItem.issueNumber, by);
+  return async (workItem, by, db) => {
+    const outcome = await approveLocally({ ...ctx, db }, workItem.issueNumber, by);
     switch (outcome.kind) {
       case "approved":
         return { kind: "resumed", workItem: outcome.workItem, approval: outcome.approval };

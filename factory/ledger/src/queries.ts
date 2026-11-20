@@ -620,3 +620,117 @@ async function inTransaction(db: Db, fn: (client: pg.PoolClient | pg.Client) => 
     client.release();
   }
 }
+
+/** What an owner command came to (add-owner-commands design, "Ledger"). */
+export type CommentOutcome = "applied" | "busy" | "refused" | "unknown";
+
+export interface CommentRow {
+  id: string;
+  /** Null when the issue had no work item. */
+  workItemId: string | null;
+  repository: string;
+  issueNumber: number;
+  githubCommentId: number;
+  author: string;
+  /** As written, unknown verbs too. */
+  verb: string;
+  /** The comment's body as read at receipt. */
+  body: string;
+  receivedAt: Date;
+  outcome: CommentOutcome;
+  /** The work item's state the command met; null without a work item. */
+  stateMet: string | null;
+}
+
+export type NewComment = Omit<CommentRow, "id" | "receivedAt">;
+
+interface CommentRecord {
+  id: string;
+  work_item_id: string | null;
+  repository: string;
+  issue_number: number;
+  github_comment_id: string;
+  author: string;
+  verb: string;
+  body: string;
+  received_at: Date;
+  outcome: CommentOutcome;
+  state_met: string | null;
+}
+
+const COMMENT_COLUMNS = "id, work_item_id, repository, issue_number, github_comment_id, author, verb, body, received_at, outcome, state_met";
+
+/** The verbs whose applied command counts as an owner intervention (docs/m3.5-owner-commands.md, section 3). */
+const INTERVENTION_VERBS = ["approve", "revise", "abort", "resume"];
+
+function toComment(row: CommentRecord): CommentRow {
+  return {
+    id: row.id,
+    workItemId: row.work_item_id,
+    repository: row.repository,
+    issueNumber: row.issue_number,
+    // GitHub's ids are 64-bit; today's fit a double exactly (checked on the way in).
+    githubCommentId: Number(row.github_comment_id),
+    author: row.author,
+    verb: row.verb,
+    body: row.body,
+    receivedAt: row.received_at,
+    outcome: row.outcome,
+    stateMet: row.state_met,
+  };
+}
+
+/**
+ * The issue's work item, locked (`SELECT … FOR UPDATE`) until the caller's transaction ends, so
+ * commands on one work item are decided one at a time. `db` must be a client inside a
+ * transaction; on a pool the lock would end with the statement. Undefined without a work item:
+ * nothing is locked then.
+ */
+export async function lockWorkItem(db: Db, repository: string, issueNumber: number): Promise<WorkItemRow | undefined> {
+  const { rows } = await db.query<WorkItemRecord>(`SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE repository = $1 AND issue_number = $2 FOR UPDATE`, [
+    repository,
+    issueNumber,
+  ]);
+  return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
+}
+
+/**
+ * Records an owner command; undefined when its GitHub comment id is recorded already, which then
+ * stays as it was. A concurrent record of the same id waits for the first to commit, then gets
+ * undefined.
+ */
+export async function recordComment(db: Db, comment: NewComment): Promise<CommentRow | undefined> {
+  if (!Number.isSafeInteger(comment.githubCommentId) || comment.githubCommentId <= 0) {
+    throw new Error(`not a GitHub comment id: ${String(comment.githubCommentId)}`);
+  }
+  const { rows } = await db.query<CommentRecord>(
+    `INSERT INTO comments (work_item_id, repository, issue_number, github_comment_id, author, verb, body, outcome, state_met)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (github_comment_id) DO NOTHING
+     RETURNING ${COMMENT_COLUMNS}`,
+    [comment.workItemId, comment.repository, comment.issueNumber, comment.githubCommentId, comment.author, comment.verb, comment.body, comment.outcome, comment.stateMet],
+  );
+  return rows[0] === undefined ? undefined : toComment(rows[0]);
+}
+
+/** Sets what a recorded command came to, once its effect is known; a missing row is an error. */
+export async function setCommentOutcome(db: Db, commentId: string, outcome: CommentOutcome): Promise<CommentRow> {
+  const { rows } = await db.query<CommentRecord>(`UPDATE comments SET outcome = $2 WHERE id = $1 RETURNING ${COMMENT_COLUMNS}`, [commentId, outcome]);
+  if (rows[0] === undefined) throw new Error(`comment ${commentId} not found`);
+  return toComment(rows[0]);
+}
+
+/** The work item's owner commands, oldest first. */
+export async function listComments(db: Db, workItemId: string): Promise<CommentRow[]> {
+  const { rows } = await db.query<CommentRecord>(`SELECT ${COMMENT_COLUMNS} FROM comments WHERE work_item_id = $1 ORDER BY received_at, id`, [workItemId]);
+  return rows.map(toComment);
+}
+
+/** The work item's owner interventions: its applied `/approve`, `/revise`, `/abort` and `/resume`. */
+export async function countInterventions(db: Db, workItemId: string): Promise<number> {
+  const { rows } = await db.query<{ n: string }>("SELECT count(*) AS n FROM comments WHERE work_item_id = $1 AND outcome = 'applied' AND verb = ANY($2)", [
+    workItemId,
+    INTERVENTION_VERBS,
+  ]);
+  return Number(rows[0]?.n ?? 0);
+}

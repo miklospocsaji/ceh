@@ -1,6 +1,6 @@
 # 0009 GitHub App auth
 
-Status: accepted (2026-11-02; owner decisions of 2026-11-02); amended 2026-11-13 (pull requests)
+Status: accepted (2026-11-02; owner decisions of 2026-11-02); amended 2026-11-13 (pull requests) and 2026-11-20 (owner commands)
 
 ## Context
 
@@ -47,3 +47,14 @@ Consequences:
 - A leaked installation token or private key can now also open, comment on and merge pull requests on this repository. Contents write already allowed pushing to any branch, `master` included.
 - Branch protection on `master` stops both (owner, 2026-11-13). Every change reaches `master` through a pull request whose `check` job (`pnpm check` in CI, from GitHub Actions only) is green. No one may push to `master` directly, force-push or delete it, and the rule binds admins too. It requires no approving review: the owner is the only human collaborator and cannot approve their own pull requests.
 - So a leaked credential or a factory bug can still change the change branches, and can open and merge a pull request whose CI is green. It can no longer write to `master` past CI. The factory itself never merges.
+
+## Amendment 2026-11-20: owner commands read issue comments by id
+
+M3.5 (add-owner-commands, ADR 0015) answers every owner command, not only `/approve`:
+- **The webhook** still checks `X-Hub-Signature-256` first. For `issue_comment.created` on an issue of the target, whose first line is a command and whose `comment.user.login` is the target's owner, it starts one `command` worker task with the comment's id only. The owner is the target's `owner` (ADR 0014), no longer a login in `infra/cdk.json`.
+- **The Forge** gains `getComment(id)` (`GET /repos/{owner}/{repo}/issues/comments/{id}`), so the `command` task reads the comment itself, checks its author and issue again, and never trusts text passed through the webhook.
+- **No new permission or event.** Reading an issue comment needs Issues read, which the App has (Issues read and write). The App was already subscribed to Issue comment events (confirmed in the App's settings on 2026-11-15).
+- **Comments on pull requests still do nothing.** They belong to M4's reviewer.
+
+Consequences:
+- The bot now replies to each of the owner's commands, and only to the owner's: a non-owner can still not make it post.

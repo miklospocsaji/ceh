@@ -207,7 +207,8 @@ async function ownerCommand(command: Extract<Command, { name: "command" }>, targ
   // As it is now: an applied /approve has moved it on.
   const workItem = await findWorkItemByIssue(env.db, target.repository, command.issueNumber);
   const subject = workItem === undefined ? `Issue #${String(command.issueNumber)} has no work item` : `${describe(workItem)} is ${workItem.state}`;
-  env.out(`/${outcome.command.written}: ${outcome.outcome}, and answered on the issue. ${subject}.\n`);
+  const done = outcome.outcome === "duplicate" ? "handled already, so nothing was done or posted" : `${outcome.outcome}, and answered on the issue`;
+  env.out(`/${outcome.command.written}: ${done}. ${subject}.\n`);
   return EXIT_CODES.ok;
 }
 
