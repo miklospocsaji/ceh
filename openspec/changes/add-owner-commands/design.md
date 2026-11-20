@@ -142,3 +142,25 @@ No contracts path in `ceh`; the new types are the `Forge` interface's `IssueComm
 - Approval of the deploy (`pnpm infra:deploy` with `-c budgetEmail=<address>`), with no execution paused that must stay unchanged.
 - A throwaway `vocab` issue for the cloud check, and approval of the GitHub writes on it.
 - A second GitHub account (or a collaborator) that can comment on `vocab` issues, for the non-owner check (exit criterion 3).
+
+## Cloud results (task 4.3, 2026-11-20)
+
+- **Diff and deploy:** `pnpm image:build` and `pnpm infra:diff` were run and reviewed by the owner, then `pnpm infra:deploy`. The worker is at revision 11. Migration 0005 was applied by the first worker task, issue #22's Intake.
+- **Issue:** `vocab` #22, "Count lookups per language". Intake took 2 min 11 s, Proposal 1 min 24 s (change `add-count-lookups-per-language`, `small`). The execution paused at `AwaitApproval` at 14:32 UTC. The `await-approval` task exited 0 after posting the proposal comment.
+- **Ignored comments:** none of the following started a task or got a reply. The execution's history did not change: its last event was still the `AwaitApproval` submission. Each comment's line in the webhook log:
+  - The owner's `Looks good to me, thanks`: `ignored: no command on the comment's first line`.
+  - The owner's `Approving below:` with `/approve` on its second line: `ignored: no command on the comment's first line`.
+  - `/approve` from a second account (`miklospocsaji-weknow`): `ignored: /approve from miklospocsaji-weknow, who is not the owner`.
+- **`/status`:** the reply came 49 s after the comment, naming `awaiting-proposal-approval`, no plan yet, 1 attempt and $0.15. The execution stayed paused.
+
+  | Event | Time (UTC) |
+  | --- | --- |
+  | Comment | 16:29:12 |
+  | Webhook started the `command` task | 16:29:17 (+5 s) |
+  | Task started | 16:29:42 (+30 s) |
+  | Reply posted | 16:30:01 (+49 s) |
+
+  The task exited 0.
+- **`/approve`:** commented at 16:31:14. The webhook started the `command` task 5 s later, and the execution resumed at 16:31:44 (+30 s). The approval reply came at 16:32:17 (+63 s): `proposal-approved`, `small`, skipping Design. `Approved` exited 10 at 16:32:41, which the state machine records as `TaskFailed` and catches, and the execution went on to Plan. Its own interim comment was ignored by the webhook (`no command on the comment's first line`).
+- **End of the run:** the execution went on through Plan and Build and succeeded at 16:40:54, opening `vocab` pull request #23.
+- **`pnpm test:cloud`:** run after #22's execution ended, so the webhook test saw no other worker tasks. 3 files, 5 tests passed in 170 s.

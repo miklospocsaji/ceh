@@ -80,12 +80,12 @@ The state machine does not change in this change; its definition tests stay gree
 
 The M3.5 exit run (section 11) follows the third change. This step proves what this change ships (section 10: "a non-command and a non-owner command produce nothing, and `/status` answers in the cloud").
 
-- [ ] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show new images and the webhook's code, and no replacement of the ledger, the bucket or any other stateful resource. Show it to the owner.
-- [ ] 4.2 Owner confirms, with no execution paused that must stay unchanged; `pnpm infra:deploy`. The first worker task applies migration 0005.
-- [ ] 4.3 On a throwaway `vocab` issue the owner agrees to, labelled `factory`, with the execution paused at proposal approval:
+- [x] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show new images and the webhook's code, and no replacement of the ledger, the bucket or any other stateful resource. Show it to the owner.
+- [x] 4.2 Owner confirms, with no execution paused that must stay unchanged; `pnpm infra:deploy`. The first worker task applies migration 0005.
+- [x] 4.3 On a throwaway `vocab` issue the owner agrees to, labelled `factory`, with the execution paused at proposal approval:
   - the owner comments "Looks good to me, thanks." and a comment with `/approve` on its second line; a second account comments `/approve`. Confirm in the webhook log and the cluster's tasks that none started a task, and that the issue got no reply.
   - the owner comments `/status`. Confirm the reply arrives within about two minutes and names `awaiting-proposal-approval`.
   - the owner comments `/approve`. Confirm the execution resumes, as before.
 
   Record the timings in `design.md` under "Cloud results". Run `pnpm test:cloud`.
-- [ ] 4.4 Run `pnpm check` and `pnpm gates coverage --change add-owner-commands --tests factory` and `--tests infra`. Update `CLAUDE.md` (the `command` task replaces `approve` under "Cloud runs"; `pnpm factory command` under "Commands"). The change is archived at M3.5's exit, after `add-work-item-resume`.
+- [x] 4.4 Run `pnpm check` and `pnpm gates coverage --change add-owner-commands --tests factory` and `--tests infra`. Update `CLAUDE.md` (the `command` task replaces `approve` under "Cloud runs"; `pnpm factory command` under "Commands"). The change is archived at M3.5's exit, after `add-work-item-resume`.

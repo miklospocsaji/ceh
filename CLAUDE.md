@@ -2,7 +2,7 @@
 
 ceh, a software factory that works on target repositories it does not live in. Each target is described in `targets/<name>/` (ADR 0014); the first is `vocab`. `docs/brief.md` is the source of truth; decisions live in `docs/adr/`.
 
-M3.25 is done (brief section 7): the stack in AWS is deployed from this repository and works on `vocab`; its exit run was `vocab` issue #20. Next is M3.5, settled in `docs/m3.5-owner-commands.md`: three OpenSpec changes, in order `add-owner-commands`, `add-approval-feedback`, `add-work-item-resume`; none is started yet.
+M3.25 is done (brief section 7): the stack in AWS is deployed from this repository and works on `vocab`; its exit run was `vocab` issue #20. M3.5 is in progress, settled in `docs/m3.5-owner-commands.md`: three OpenSpec changes, in order `add-owner-commands` (built and deployed, proved on `vocab` issue #22; archived at M3.5's exit), `add-approval-feedback`, `add-work-item-resume`.
 
 ## Commands
 
@@ -18,6 +18,7 @@ M3.25 is done (brief section 7): the stack in AWS is deployed from this reposito
 - `pnpm infra:synth` / `pnpm infra:diff` / `pnpm infra:deploy`: the factory's CDK stack in eu-central-1, with `AWS_PROFILE=vocab`. Each needs `-c budgetEmail=<address>`, which is never committed. Ask the owner before every deploy. Run them through these scripts, not a bare `cdk`, so the webhook's esbuild bundling finds `infra`'s esbuild. A diff after any edit under `factory/` shows new images, since tests are in the image's build context
 - `pnpm factory run --issue <n> --until proposal|design|plan|pr [--target <name>]`: runs the factory locally against an issue of the target's repository (pushes a change branch, comments on the issue; `pr` builds the tasks in the local `ceh-build-<name>:local` image and opens a pull request). It works on a clone under `~/.factory/targets/<name>/`, never on this checkout, and stops at every approval. `--target` may be left out while there is one target. Needs `gh auth login` and `CLAUDE_CODE_OAUTH_TOKEN` in the git-ignored `.env.local` (ADR 0006)
 - `pnpm factory approve --issue <n>`: approves the proposal or design a local run stopped at
+- `pnpm factory command --issue <n> --comment <id> [--target <name>]`: handles one owner comment on the issue as the cloud's `command` task does, against the local ledger: the same records and reply on the issue. A local `/approve` approves as `pnpm factory approve` does
 - `pnpm factory cost --issue <n>`: the work item's tokens, auth mode and estimated cost per attempt and in total, from the local ledger only
 - `pnpm exec openspec <cmd>`: the pinned OpenSpec CLI (`list`, `show <id>`, `validate <id> --strict`, `archive <id> --yes`)
 
@@ -39,7 +40,7 @@ M3.25 is done (brief section 7): the stack in AWS is deployed from this reposito
 
 ## Cloud runs
 
-- An issue labelled `factory` starts an execution of the `factory-work-item` state machine through the webhook. The owner's `/approve` comment runs the `approve` worker task, for a proposal or a `large` design. Every state is a `factory-worker <state> --issue <n>` Fargate task, except Build: the build loop runs `step` in the worker and each session in a `factory-build` Fargate task (8 GB, only the API key, no ledger access). The run ends with a pull request opened by `ceh-app[bot]`; the owner reviews and merges it.
+- An issue labelled `factory` starts an execution of the `factory-work-item` state machine through the webhook. An issue comment counts only if it is the owner's and its first line is a command (`/<verb>`); the webhook ignores every other comment and posts no reply. Each owner command runs the `command` worker task (`factory-worker command --issue <n> --comment <id>`), which records the comment and replies once on the issue: `/approve` approves a proposal or a `large` design and resumes the paused execution, and `/status` names the work item's state, tasks, attempts and cost so far. Every state is a `factory-worker <state> --issue <n>` Fargate task, except Build: the build loop runs `step` in the worker and each session in a `factory-build` Fargate task (8 GB, only the API key, no ledger access). The run ends with a pull request opened by `ceh-app[bot]`; the owner reviews and merges it.
 - A stopped or failed execution cannot be resumed until M3.5's `add-work-item-resume`: relabelling ends in a `duplicate` Intake. Start again with a new issue.
 - To follow a run (with `AWS_PROFILE=vocab AWS_REGION=eu-central-1`): `aws stepfunctions list-executions` and `get-execution-history` for the states, `aws logs tail` on the worker log group (one stream per task: `worker/worker/<task-id>` for worker states, `build/build/<task-id>` for build sessions; `--log-stream-name-prefix build/` follows only builds) and the webhook log group. The log group names are in the stack outputs.
 - Each build attempt's evidence is in the artifact bucket (`ArtifactBucketName` output), under `work-items/<change-id>/tasks/<task-id>/<role>/<n>/`: `input.json`, `patch.diff`, `gates.json`, `messages.jsonl` and `outcome.json`; the task's `next.json` names the next build. Objects expire after 180 days.
