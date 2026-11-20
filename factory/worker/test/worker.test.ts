@@ -12,7 +12,7 @@ import { ForgeError } from "@ceh/factory-forge";
 import { FakeForge, type FakeIssue } from "@ceh/factory-forge/testing";
 import { createWorkItem, findOpenApproval, findWorkItemByIssue, LedgerRecorder, listAttempts, type ApprovalRow } from "@ceh/factory-ledger";
 import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
-import { DESIGN_APPROVAL_INSTRUCTION, MISSING_REQUIREMENT_COMMENT } from "@ceh/factory-orchestrator";
+import { COMMANDS_INSTRUCTION, DESIGN_APPROVAL_INSTRUCTION, MISSING_REQUIREMENT_COMMENT } from "@ceh/factory-orchestrator";
 import { loadRole, type Role } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { classified, CODE, codeFor, TESTS, testsFor } from "../../orchestrator/test/build-harness.ts";
@@ -394,7 +394,7 @@ const escalate = (reason: string, n = ISSUE.number) => ["escalate", "--issue", S
 /** The proposal author in api-key mode, as the worker runs it in the cloud. */
 const apiKeyRole = (): Role => ({ ...role, authMode: "api-key" });
 
-async function approvals(): Promise<ApprovalRow[]> {
+async function approvals(): Promise<Omit<ApprovalRow, "outcome">[]> {
   const workItem = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
   if (workItem === undefined) return [];
   const { rows } = await db.pool.query<{ id: string; kind: string; state: string; task_token: string; resolved_by: string | null }>(
@@ -523,7 +523,8 @@ describe("factory-worker await-approval", () => {
     expect(body).toContain("$0.75");
     expect(body).toContain("`api-key`");
     const last = body.trim().split("\n\n").at(-1) ?? "";
-    expect(last).toMatch(/reply `\/approve`/i);
+    expect(last).toBe("Reply `/approve`, `/revise` with your answers or the changes you want, or `/question` to ask about it.");
+    expect(last).toBe(COMMANDS_INSTRUCTION);
   });
 
   it("sends SendTaskFailure with a fixed cause when it fails, and exits 1", async () => {
@@ -691,6 +692,26 @@ describe("factory-worker command", () => {
     expect(forge.comments).toHaveLength(1);
     expect(forge.comments[0]).toMatchObject({ issueNumber: ISSUE.number, body: expect.stringContaining("`proposal`") as unknown });
     expect(out).toContain("/status");
+  });
+
+  it("applies /revise with the decision revise, and answers /question from a fresh clone of the branch", async () => {
+    const w = worker();
+    await awaiting(w);
+    const head = git(remote, "rev-parse", `refs/heads/${CHANGE_ID}`);
+
+    const question = await w.run(commandFor("/question Why vocab-import?"), [{ result: { answer: "The issue names the import." } }]);
+
+    expect(question.code).toBe(WORKER_EXIT.ok);
+    expect(w.calls.at(-1)).toMatchObject({ role: "proposal-author", config: { writable: [], maxTurns: 10 } });
+    expect(forge.comments.at(-1)?.body).toContain("The issue names the import.");
+    expect(forge.comments.at(-1)?.body).toContain(head);
+    expect(taskTokens.successes).toEqual([]);
+
+    const revise = await w.run(commandFor("/revise Name the capability vocab-import."));
+
+    expect(revise.code).toBe(WORKER_EXIT.ok);
+    expect(taskTokens.successes).toEqual([{ taskToken: TOKEN, output: '{"decision":"revise"}' }]);
+    expect((await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number))?.state).toBe("proposal");
   });
 
   it("exits 0 whatever the command's outcome: busy, refused or unknown", async () => {

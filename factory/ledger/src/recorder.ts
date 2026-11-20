@@ -46,21 +46,26 @@ export class LedgerRecorder implements Recorder {
     this.#db = db;
   }
 
-  /** Rejects when the work item has no open attempt for the role. */
-  async record(itemId: string, role: string, message: SDKMessage): Promise<void> {
-    const { rows } = await this.#db.query<{ id: string }>(
-      "SELECT id FROM attempts WHERE work_item_id = $1 AND role = $2 AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
-      [itemId, role],
-    );
-    const attemptId = rows[0]?.id;
-    if (attemptId === undefined) throw new Error(`no open attempt for work item ${itemId} and role ${role}`);
+  /**
+   * Into `attemptId` when given (it must be the work item's open attempt), otherwise into the work
+   * item's latest open attempt for the role. Rejects when there is no such attempt.
+   */
+  async record(itemId: string, role: string, message: SDKMessage, attemptId?: string): Promise<void> {
+    const { rows } =
+      attemptId === undefined
+        ? await this.#db.query<{ id: string }>("SELECT id FROM attempts WHERE work_item_id = $1 AND role = $2 AND ended_at IS NULL ORDER BY id DESC LIMIT 1", [itemId, role])
+        : await this.#db.query<{ id: string }>("SELECT id FROM attempts WHERE work_item_id = $1 AND id = $2 AND ended_at IS NULL", [itemId, attemptId]);
+    const target = rows[0]?.id;
+    if (target === undefined) {
+      throw new Error(attemptId === undefined ? `no open attempt for work item ${itemId} and role ${role}` : `attempt ${attemptId} of work item ${itemId} is not open`);
+    }
 
     const usage = extractUsage(message);
     await this.#db.query(
       `INSERT INTO messages (attempt_id, seq, type, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, raw)
        SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3, $4, $5, $6, $7 FROM messages WHERE attempt_id = $1`,
       [
-        attemptId,
+        target,
         message.type,
         usage?.inputTokens ?? null,
         usage?.outputTokens ?? null,
@@ -71,9 +76,9 @@ export class LedgerRecorder implements Recorder {
     );
 
     if (message.type === "system" && message.subtype === "init") {
-      await this.#db.query("UPDATE attempts SET auth_mode = $2 WHERE id = $1", [attemptId, AUTH_MODES[message.apiKeySource] ?? null]);
+      await this.#db.query("UPDATE attempts SET auth_mode = $2 WHERE id = $1", [target, AUTH_MODES[message.apiKeySource] ?? null]);
     } else if (message.type === "result") {
-      await this.#db.query("UPDATE attempts SET cost_usd_estimate = $2 WHERE id = $1", [attemptId, message.total_cost_usd]);
+      await this.#db.query("UPDATE attempts SET cost_usd_estimate = $2 WHERE id = $1", [target, message.total_cost_usd]);
     }
   }
 }

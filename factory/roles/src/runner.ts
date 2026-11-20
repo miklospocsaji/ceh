@@ -14,7 +14,7 @@ import { query as sdkQuery, type Options, type SDKMessage, type SDKResultMessage
 import { z } from "zod";
 import { DENY_LIST, RoleConfigError, writableFor, type Role, type RoleConfig } from "./config.ts";
 import { createPathGuard, createReadGuard } from "./guard.ts";
-import { renderPrompt, type PromptArtifact, type PromptIssue, type RetryEvidence } from "./prompt.ts";
+import { renderPrompt, type OwnerFeedback, type PromptArtifact, type PromptIssue, type RetryEvidence } from "./prompt.ts";
 
 const run = promisify(execFile);
 
@@ -56,9 +56,13 @@ export class AttemptFailed extends Error {
   }
 }
 
-/** Where every SDK message of an attempt goes; the ledger implements it in add-local-proposal-run. */
+/**
+ * Where every SDK message of an attempt goes; the ledger implements it in add-local-proposal-run.
+ * `attemptId`, when the work item names one, binds the message to that attempt: a question session
+ * runs while a revision of the same role may run too (add-approval-feedback).
+ */
 export interface Recorder {
-  record(itemId: string, role: string, message: SDKMessage): Promise<void>;
+  record(itemId: string, role: string, message: SDKMessage, attemptId?: string): Promise<void>;
 }
 
 export interface WorkItem {
@@ -73,6 +77,10 @@ export interface WorkItem {
   taskStubs?: readonly string[];
   /** A prompt the caller rendered, for roles whose input is not the issue (build roles, the classifier). */
   prompt?: string;
+  /** The owner's commands for the stage, on a revision of the proposal author or the architect. */
+  ownerFeedback?: OwnerFeedback;
+  /** The attempt every message of the session is recorded into; otherwise the role's open attempt. */
+  attemptId?: string;
 }
 
 /** The shape of the SDK's `query`, so tests can inject a stub. */
@@ -141,7 +149,7 @@ export function createRunner(options: RunnerOptions): RunRole {
     let result: SDKResultMessage | undefined;
     try {
       for await (const message of session) {
-        await recorder.record(item.id, role.name, message);
+        await recorder.record(item.id, role.name, message, item.attemptId);
         if (message.type === "system" && message.subtype === "init" && message.apiKeySource !== auth.apiKeySource) {
           // Before any tool runs: stop the session and take nothing more from it.
           abortController.abort();

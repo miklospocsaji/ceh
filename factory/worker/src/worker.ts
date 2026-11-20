@@ -32,6 +32,7 @@ import {
   approved,
   awaitApproval,
   changeFileReader,
+  cloudReviser,
   CommandFailed,
   commandFailedReply,
   handleCommand,
@@ -221,7 +222,17 @@ async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
   const subject = `command for issue #${String(issueNumber)}, comment ${String(commentId)}`;
   let outcome;
   try {
-    outcome = await handleCommand({ db, forge, target, approve: (workItem, by, tx) => approve({ db: tx, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by) }, issueNumber, commentId);
+    const ctx = { db, forge, target };
+    outcome = await handleCommand(
+      {
+        ...ctx,
+        approve: (workItem, by, tx) => approve({ db: tx, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by),
+        revise: (workItem, by, tx) => cloudReviser({ ...ctx, taskTokens: requireTaskTokens(deps) })(workItem, by, tx),
+        question: { runRole: deps.runRole, proposalAuthor: deps.role, architect: deps.roles.architect, home: deps.home },
+      },
+      issueNumber,
+      commentId,
+    );
   } catch (error) {
     if (error instanceof InvalidCommand) throw error;
     // Fixed text only: no error's message reaches GitHub.
@@ -235,7 +246,7 @@ async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
   const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId} in ${outcome.workItem.state}`;
   if (outcome.commentError !== undefined) deps.err(`factory-worker: ${subject}: the confirmation comment failed: ${messageOf(outcome.commentError)}\n`);
   if (outcome.error !== undefined) {
-    deps.err(`factory-worker: ${subject}: ${command} could not resume ${workItem}: ${messageOf(outcome.error)}\n`);
+    deps.err(`factory-worker: ${subject}: ${command} did not go through for ${workItem}: ${messageOf(outcome.error)}\n`);
     return WORKER_EXIT.error;
   }
   deps.out(`factory-worker: ${subject}: ${command} ${outcome.outcome} (${workItem})\n`);

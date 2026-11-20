@@ -6,6 +6,7 @@ import {
   DesignResult,
   ImplementationResult,
   PlanResult,
+  QuestionAnswer,
   resultSchemas,
   ReviewResult,
   TestResult,
@@ -152,5 +153,21 @@ describe("BuildOutcome", () => {
   it("rejects a base commit that is not a full SHA", () => {
     expect(BuildOutcome.safeParse({ ...valid.outcome, baseCommit: "HEAD" }).success).toBe(false);
     expect(BuildOutcome.safeParse({ ...valid.outcome, baseCommit: BASE_COMMIT.slice(0, 7) }).success).toBe(false);
+  });
+});
+
+describe("add-approval-feedback: whatChanged and QuestionAnswer", () => {
+  it("DesignResult takes an optional whatChanged", () => {
+    expect(DesignResult.safeParse({ ...valid.design, whatChanged: "Kept the parser in the domain package." }).success).toBe(true);
+    expect(DesignResult.parse(valid.design)).not.toHaveProperty("whatChanged");
+    expect(DesignResult.safeParse({ ...valid.design, whatChanged: 3 }).success).toBe(false);
+  });
+
+  it("QuestionAnswer is exactly { answer }, with a non-empty answer, registered as question-answer", () => {
+    expect(QuestionAnswer.parse({ answer: "Because the issue asks for it." })).toEqual({ answer: "Because the issue asks for it." });
+    expect(QuestionAnswer.safeParse({ answer: "" }).success).toBe(false);
+    expect(QuestionAnswer.safeParse({}).success).toBe(false);
+    expect(QuestionAnswer.safeParse({ answer: "x", changed: ["proposal.md"] }).success).toBe(false);
+    expect(resultSchemas["question-answer"]).toBe(QuestionAnswer);
   });
 });

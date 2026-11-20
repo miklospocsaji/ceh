@@ -14,8 +14,14 @@ export const DesignResult = z.strictObject({
   /** The decisions that need an ADR. */
   adrNeeded: z.array(text),
   openQuestions: z.array(text),
+  /** On a revision after the owner's `/revise`: what the revision changed (add-approval-feedback). */
+  whatChanged: z.string().optional(),
 });
 export type DesignResult = z.infer<typeof DesignResult>;
+
+/** A question session's answer to an owner's `/question` (add-approval-feedback): nothing else. */
+export const QuestionAnswer = z.strictObject({ answer: text });
+export type QuestionAnswer = z.infer<typeof QuestionAnswer>;
 
 const Finding = z.strictObject({
   severity: z.enum(["blocker", "major", "minor"]),

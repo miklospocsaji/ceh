@@ -2,8 +2,13 @@
  * Proposal: runs the proposal-author role on the work item's worktree until it produces a
  * change that passes `openspec validate --strict` and a result that passes its schema, then
  * commits the change folder and pushes the branch. Failed attempts are retried with their
- * evidence, up to MAX_PROPOSAL_ATTEMPTS in total; after that, or at once on an
+ * evidence, up to MAX_PROPOSAL_ATTEMPTS in a run; after that, or at once on an
  * `auth-mode-mismatch` (ADR 0006), the work item escalates and the issue gets a comment.
+ *
+ * A run after the owner's `/revise` is a revision (add-approval-feedback): the worktree starts
+ * from the branch head, so the owner's own pushes are kept; the author gets the stage's `/revise`
+ * comments and answered questions; its attempts are counted from the latest `/revise`; its result
+ * must say what changed; and its commit says it revises the proposal.
  */
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
@@ -14,7 +19,8 @@ import { closeAttempt, listAttempts, openAttempt, setWorkItemState, type Attempt
 import { AttemptFailed, type RetryEvidence, type Role, type RunRole, type WorkItem } from "@ceh/factory-roles";
 import { changeFiles, currentSpecs, exists } from "./change-files.ts";
 import { renderEvidence } from "./evidence.ts";
-import { commitChange, ensureWorktree, type GitIdentity } from "./git.ts";
+import { NO_WHAT_CHANGED, revisionRun, saysWhatChanged, stageFeedback, type AttemptFailure } from "./feedback.ts";
+import { commitChange, ensureWorktree, resetToRemoteHead, type GitIdentity } from "./git.ts";
 import type { HandlerContext, Transition, WorkItemState } from "./handler.ts";
 
 const run = promisify(execFile);
@@ -22,7 +28,7 @@ const run = promisify(execFile);
 /** The factory's pinned openspec, never one from the worktree. */
 const OPENSPEC = resolve(import.meta.dirname, "../../../node_modules/.bin/openspec");
 
-/** Attempts per Proposal, in total, before the work item escalates. */
+/** Attempts per run of Proposal (the first, or a revision) before the work item escalates. */
 export const MAX_PROPOSAL_ATTEMPTS = 3;
 
 const PROPOSAL: WorkItemState = "proposal";
@@ -52,15 +58,19 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
     branch: item.branch,
     ...(ctx.home === undefined ? {} : { home: ctx.home }),
   });
+  const stage = await stageFeedback(db, item.id, "proposal");
+  const { revision, since } = await revisionRun(db, item.id, PROPOSAL, stage);
+  if (revision) await resetToRemoteHead(worktree, item.branch, item.changeId);
   await scaffold(worktree, item.changeId);
   const issue = await forge.getIssue(item.issueNumber);
 
-  // A crash can leave an attempt open; it counts as failed, and toward the limit.
-  const previous = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === PROPOSAL);
-  for (const attempt of previous.filter(isOpen)) await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "error" });
+  // A crash can leave an attempt open; it counts as failed, and toward the run's limit.
+  const all = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === PROPOSAL);
+  for (const attempt of all.filter(isOpen)) await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "error" });
+  const previous = all.filter((attempt) => since === undefined || attempt.startedAt > since);
 
   let used = previous.length;
-  let last: AttemptFailed | undefined;
+  let last: AttemptFailure | undefined;
   while (used < MAX_PROPOSAL_ATTEMPTS) {
     used += 1;
     const evidence: RetryEvidence | undefined = last === undefined ? undefined : { reason: last.reason, evidence: last.evidence };
@@ -71,9 +81,10 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
       issue: { title: issue.title, body: issue.body },
       changeFiles: await changeFiles(worktree, item.changeId),
       specs: await currentSpecs(worktree),
+      ...(revision ? { ownerFeedback: stage.feedback } : {}),
     };
 
-    const attempt = await openAttempt(db, { workItemId: item.id, state: PROPOSAL, role: role.name });
+    const attempt = await openAttempt(db, { workItemId: item.id, state: PROPOSAL, role: role.name, ...(revision ? { commentIds: stage.commentIds } : {}) });
     let result: unknown;
     try {
       result = await runRole(role, workItem, evidence);
@@ -92,7 +103,12 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
     const mismatch = await capabilityMismatch(worktree, item.changeId, result);
     if (mismatch !== undefined) {
       await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "invalid-result" });
-      last = new AttemptFailed("invalid-result", mismatch);
+      last = { reason: "invalid-result", evidence: mismatch };
+      continue;
+    }
+    if (revision && !saysWhatChanged(result)) {
+      await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: NO_WHAT_CHANGED.reason });
+      last = NO_WHAT_CHANGED;
       continue;
     }
     // The validated result stays on its attempt, so later states (the summary in the cloud) read it from the ledger.
@@ -102,7 +118,9 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
       worktree,
       changeId: item.changeId,
       ...(ctx.committer === undefined ? {} : { identity: ctx.committer }),
-      message: `docs(${item.changeId}): propose the change\n\nWritten by the ${role.name} role for issue #${String(item.issueNumber)}.`,
+      message: revision
+        ? `docs(${item.changeId}): revise the proposal\n\nRevised by the ${role.name} role after the owner's /revise on issue #${String(item.issueNumber)}.`
+        : `docs(${item.changeId}): propose the change\n\nWritten by the ${role.name} role for issue #${String(item.issueNumber)}.`,
     });
     await forge.pushBranch({ worktree, branch: item.branch });
     return { kind: "advance", workItem: await setWorkItemState(db, item.id, NEXT), result };
@@ -111,7 +129,7 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
   return escalate(ctx, item, used, last);
 }
 
-async function escalate(ctx: ProposalContext, item: WorkItemRow, used: number, last: AttemptFailed | undefined): Promise<Transition> {
+async function escalate(ctx: ProposalContext, item: WorkItemRow, used: number, last: AttemptFailure | undefined): Promise<Transition> {
   const reason = last === undefined ? `no attempts left (${String(used)} used)` : last.reason;
   const summary =
     last?.reason === "auth-mode-mismatch"

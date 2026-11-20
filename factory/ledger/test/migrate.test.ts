@@ -21,12 +21,12 @@ async function tables(): Promise<string[]> {
 
 describe("migrate", () => {
   it("applies each migration once and is idempotent", async () => {
-    expect(await migrate(db.pool)).toEqual(["0001_init", "0002_cloud", "0003_build", "0004_repository", "0005_comments"]);
+    expect(await migrate(db.pool)).toEqual(["0001_init", "0002_cloud", "0003_build", "0004_repository", "0005_comments", "0006_approval_feedback"]);
     expect(await tables()).toEqual(["approvals", "attempts", "comments", "events", "messages", "schema_migrations", "tasks", "work_items"]);
 
     expect(await migrate(db.pool)).toEqual([]);
     const { rows } = await db.pool.query<{ version: string }>("SELECT version FROM schema_migrations");
-    expect(rows.map((row) => row.version).sort()).toEqual(["0001_init", "0002_cloud", "0003_build", "0004_repository", "0005_comments"]);
+    expect(rows.map((row) => row.version).sort()).toEqual(["0001_init", "0002_cloud", "0003_build", "0004_repository", "0005_comments", "0006_approval_feedback"]);
   });
 
   it("Scenario: Existing work items are backfilled", async () => {
@@ -43,7 +43,7 @@ describe("migrate", () => {
       const rows = async () => (await old.pool.query<Record<string, unknown>>("SELECT * FROM work_items ORDER BY id")).rows;
       const earlier = await rows();
 
-      expect(await migrate(old.pool)).toEqual(["0004_repository", "0005_comments"]);
+      expect(await migrate(old.pool)).toEqual(["0004_repository", "0005_comments", "0006_approval_feedback"]);
 
       const later = await rows();
       expect(later.map((row) => row["repository"])).toEqual(["miklospocsaji/vocab", "miklospocsaji/vocab"]);

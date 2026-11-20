@@ -23,7 +23,8 @@ import {
 import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
 import { testTarget } from "@ceh/factory-target/testing";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cloudApprover, type TaskTokens } from "../src/approval.ts";
+import { loadRole, type Role } from "@ceh/factory-roles";
+import { cloudApprover, cloudReviser, type TaskTokens } from "../src/approval.ts";
 import { handleCommand, InvalidCommand, type CommandContext, type CommandOutcome } from "../src/commands/handle.ts";
 import { KNOWN_VERBS } from "../src/commands/parse.ts";
 
@@ -68,8 +69,10 @@ class FakeTaskTokens implements TaskTokens {
 let db: TestDatabase;
 let forge: FakeForge;
 let taskTokens: FakeTaskTokens;
+let roles: { proposalAuthor: Role; architect: Role };
 
 beforeAll(async () => {
+  roles = { proposalAuthor: await loadRole("proposal-author", TARGET), architect: await loadRole("architect", TARGET) };
   db = await createTestDatabase("commands");
   await migrate(db.pool);
   return () => db.close();
@@ -91,7 +94,13 @@ afterEach(async () => {
 
 function context(): CommandContext {
   const base = { db: db.pool, forge, target: TARGET };
-  return { ...base, approve: cloudApprover({ ...base, taskTokens }) };
+  return {
+    ...base,
+    approve: cloudApprover({ ...base, taskTokens }),
+    revise: cloudReviser({ ...base, taskTokens }),
+    // No session runs in these tests: a question would need the forge's remote.
+    question: { runRole: () => Promise.reject(new Error("no session in these tests")), proposalAuthor: roles.proposalAuthor, architect: roles.architect },
+  };
 }
 
 interface Posted {
@@ -364,10 +373,8 @@ describe("handleCommand: unknown commands", () => {
 });
 
 describe("handleCommand: commands of the later M3.5 changes (interim reply)", () => {
-  const cases = [
-    ...["revise", "question"].flatMap((verb) => [...ALL_STATES.filter((s) => !(BUSY_STATES as readonly string[]).includes(s)), undefined].map((state) => [verb, state] as const)),
-    ...["abort", "resume"].flatMap((verb) => [...ALL_STATES, undefined].map((state) => [verb, state] as const)),
-  ];
+  // `/revise` and `/question` came with add-approval-feedback; `/abort` and `/resume` come with add-work-item-resume.
+  const cases = ["abort", "resume"].flatMap((verb) => [...ALL_STATES, undefined].map((state) => [verb, state] as const));
 
   it.each(cases)("answers /%s in %s as not yet available, changing nothing", async (verb, state) => {
     if (state !== undefined) await workItemIn(state);

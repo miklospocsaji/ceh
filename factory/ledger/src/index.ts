@@ -25,8 +25,11 @@ export {
   markTaskDone,
   openApproval,
   openAttempt,
+  openQuestionAttempt,
   recordComment,
   reopenApproval,
+  stageComments,
+  stageQuestions,
   setAttemptClassification,
   setCommentOutcome,
   setWorkItemState,
@@ -35,6 +38,7 @@ export {
 } from "./queries.ts";
 export type {
   ApprovalKind,
+  ApprovalOutcome,
   ApprovalRow,
   ApprovalState,
   AttemptEnd,
@@ -52,6 +56,8 @@ export type {
   NewPlan,
   NewWorkItem,
   PlanTaskInput,
+  Stage,
+  StageQuestion,
   TaskRow,
   TaskStatus,
   WorkItemRow,

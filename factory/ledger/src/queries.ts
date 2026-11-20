@@ -9,7 +9,7 @@ import type { TokenUsage } from "./recorder.ts";
 
 export type AuthMode = "api-key" | "subscription";
 /** Why an attempt failed: a runner reason, a build reason, or a build task that left no outcome. */
-export type FailureReason = RoleFailureReason | "diff-check" | "red" | "green" | "no-outcome";
+export type FailureReason = RoleFailureReason | "diff-check" | "red" | "green" | "no-outcome" | "no-what-changed" | "abandoned";
 export type AttemptOutcome = "succeeded" | "failed";
 
 export interface WorkItemRow {
@@ -61,6 +61,8 @@ export interface AttemptRow {
   classification: unknown;
   /** The gates result of a build attempt. */
   gates: unknown;
+  /** The owner commands (`comments.id`) the role was given, oldest first; empty for most attempts. */
+  commentIds: string[];
 }
 
 export interface NewAttempt {
@@ -69,6 +71,8 @@ export interface NewAttempt {
   role: string;
   taskId?: string;
   storePrefix?: string;
+  /** The owner commands (`comments.id`) the role is given; defaults to none. */
+  commentIds?: readonly string[];
 }
 
 export type AttemptEnd =
@@ -77,6 +81,13 @@ export type AttemptEnd =
 
 export type ApprovalState = "open" | "closed";
 export type ApprovalKind = "proposal" | "design";
+/** How a closed approval was closed: by `/approve` or by `/revise` (migration 0006). */
+export type ApprovalOutcome = "approved" | "revise";
+/** What awaits the owner's approval: the proposal, or a `large` change's design. */
+export type Stage = "proposal" | "design";
+
+/** The work item state in which the owner's commands are about the stage. */
+const AWAITING_STATE: Record<Stage, string> = { proposal: "awaiting-proposal-approval", design: "awaiting-design-approval" };
 
 export interface ApprovalRow {
   id: string;
@@ -88,6 +99,8 @@ export interface ApprovalRow {
   resolvedAt: Date | null;
   /** The login that resolved it. */
   resolvedBy: string | null;
+  /** How it was closed; null while open. */
+  outcome: ApprovalOutcome | null;
 }
 
 export interface NewApproval {
@@ -211,6 +224,7 @@ interface AttemptRecord {
   store_prefix: string | null;
   classification: unknown;
   gates: unknown;
+  comment_ids: string[];
 }
 
 interface ApprovalRecord {
@@ -222,6 +236,7 @@ interface ApprovalRecord {
   requested_at: Date;
   resolved_at: Date | null;
   resolved_by: string | null;
+  outcome: ApprovalOutcome | null;
 }
 
 interface TaskRecord {
@@ -253,8 +268,8 @@ interface MessageRecord {
 
 const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, created_at, updated_at";
 const ATTEMPT_COLUMNS =
-  "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates";
-const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by";
+  "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates, comment_ids";
+const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by, outcome";
 const TASK_COLUMNS = "id, work_item_id, task_id, position, title, depends_on, files, scenarios, tests, status, done_commit, plan_attempt_id";
 
 function toWorkItem(row: WorkItemRecord): WorkItemRow {
@@ -290,6 +305,8 @@ function toAttempt(row: AttemptRecord): AttemptRow {
     storePrefix: row.store_prefix,
     classification: row.classification,
     gates: row.gates,
+    // bigint[] comes back as strings, like every other id.
+    commentIds: row.comment_ids.map(String),
   };
 }
 
@@ -334,6 +351,7 @@ function toApproval(row: ApprovalRecord): ApprovalRow {
     requestedAt: row.requested_at,
     resolvedAt: row.resolved_at,
     resolvedBy: row.resolved_by,
+    outcome: row.outcome,
   };
 }
 
@@ -388,10 +406,10 @@ export async function setWorkItemState(db: Db, workItemId: string, state: string
 /** Opens the next attempt for the work item's state, numbered from 1. */
 export async function openAttempt(db: Db, attempt: NewAttempt): Promise<AttemptRow> {
   const { rows } = await db.query<AttemptRecord>(
-    `INSERT INTO attempts (work_item_id, state, role, n, task_id, store_prefix)
-     SELECT $1, $2, $3, COALESCE(MAX(n), 0) + 1, $4, $5 FROM attempts WHERE work_item_id = $1 AND state = $2
+    `INSERT INTO attempts (work_item_id, state, role, n, task_id, store_prefix, comment_ids)
+     SELECT $1, $2, $3, COALESCE(MAX(n), 0) + 1, $4, $5, $6::bigint[] FROM attempts WHERE work_item_id = $1 AND state = $2
      RETURNING ${ATTEMPT_COLUMNS}`,
-    [attempt.workItemId, attempt.state, attempt.role, attempt.taskId ?? null, attempt.storePrefix ?? null],
+    [attempt.workItemId, attempt.state, attempt.role, attempt.taskId ?? null, attempt.storePrefix ?? null, [...(attempt.commentIds ?? [])]],
   );
   return toAttempt(only(rows, "openAttempt"));
 }
@@ -494,16 +512,16 @@ export async function findOpenApproval(db: Db, workItemId: string): Promise<Appr
 }
 
 /**
- * Closes the work item's open approval, resolved by `resolvedBy`, and returns it with its task
- * token. One statement, so of two concurrent closes only one gets the approval; the other, and
- * a close with nothing open, get undefined.
+ * Closes the work item's open approval, resolved by `resolvedBy` with `outcome`, and returns it
+ * with its task token. One statement, so of two concurrent closes only one gets the approval; the
+ * other, and a close with nothing open, get undefined.
  */
-export async function closeApproval(db: Db, workItemId: string, resolvedBy: string): Promise<ApprovalRow | undefined> {
+export async function closeApproval(db: Db, workItemId: string, resolvedBy: string, outcome: ApprovalOutcome = "approved"): Promise<ApprovalRow | undefined> {
   const { rows } = await db.query<ApprovalRecord>(
-    `UPDATE approvals SET state = 'closed', resolved_at = clock_timestamp(), resolved_by = $2
+    `UPDATE approvals SET state = 'closed', resolved_at = clock_timestamp(), resolved_by = $2, outcome = $3
      WHERE work_item_id = $1 AND state = 'open'
      RETURNING ${APPROVAL_COLUMNS}`,
-    [workItemId, resolvedBy],
+    [workItemId, resolvedBy, outcome],
   );
   return rows[0] === undefined ? undefined : toApproval(rows[0]);
 }
@@ -516,7 +534,7 @@ export async function reopenApproval(db: Db, approvalId: string): Promise<Approv
   let rows: ApprovalRecord[];
   try {
     ({ rows } = await db.query<ApprovalRecord>(
-      `UPDATE approvals SET state = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = $1 RETURNING ${APPROVAL_COLUMNS}`,
+      `UPDATE approvals SET state = 'open', resolved_at = NULL, resolved_by = NULL, outcome = NULL WHERE id = $1 RETURNING ${APPROVAL_COLUMNS}`,
       [approvalId],
     ));
   } catch (error) {
@@ -733,4 +751,38 @@ export async function countInterventions(db: Db, workItemId: string): Promise<nu
     INTERVENTION_VERBS,
   ]);
   return Number(rows[0]?.n ?? 0);
+}
+
+/** One of a stage's questions, with the attempt that answers or answered it, if one was opened. */
+export interface StageQuestion {
+  comment: CommentRow;
+  attempt: AttemptRow | undefined;
+}
+
+/**
+ * The stage's applied owner commands, oldest first: the comments applied while the work item
+ * awaited the stage's approval (`/approve`, `/revise`, `/question`).
+ */
+export async function stageComments(db: Db, workItemId: string, stage: Stage): Promise<CommentRow[]> {
+  const { rows } = await db.query<CommentRecord>(
+    `SELECT ${COMMENT_COLUMNS} FROM comments WHERE work_item_id = $1 AND state_met = $2 AND outcome = 'applied' ORDER BY received_at, id`,
+    [workItemId, AWAITING_STATE[stage]],
+  );
+  return rows.map(toComment);
+}
+
+/** The stage's applied `/question`s, oldest first, each with the `<stage>-question` attempt that names it. */
+export async function stageQuestions(db: Db, workItemId: string, stage: Stage): Promise<StageQuestion[]> {
+  const questions = (await stageComments(db, workItemId, stage)).filter((comment) => comment.verb === "question");
+  const attempts = (await listAttempts(db, workItemId)).filter((attempt) => attempt.state === `${stage}-question`);
+  return questions.map((comment) => ({ comment, attempt: attempts.filter((attempt) => attempt.commentIds.includes(comment.id)).at(-1) }));
+}
+
+/** The work item's open question attempt, of either stage; a work item answers one question at a time. */
+export async function openQuestionAttempt(db: Db, workItemId: string): Promise<AttemptRow | undefined> {
+  const { rows } = await db.query<AttemptRecord>(
+    `SELECT ${ATTEMPT_COLUMNS} FROM attempts WHERE work_item_id = $1 AND state IN ('proposal-question', 'design-question') AND ended_at IS NULL ORDER BY id DESC LIMIT 1`,
+    [workItemId],
+  );
+  return rows[0] === undefined ? undefined : toAttempt(rows[0]);
 }

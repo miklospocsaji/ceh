@@ -11,7 +11,7 @@
  */
 import { parseArgs } from "node:util";
 import { findWorkItemByIssue, listAttempts, listAttemptUsage, type AttemptRow, type AttemptUsage, type Db, type WorkItemRow } from "@ceh/factory-ledger";
-import { approveLocally, handleCommand, InvalidCommand, isRunUntil, localApprover, RUN_UNTIL, runWorkItem, type RunContext } from "@ceh/factory-orchestrator";
+import { approveLocally, handleCommand, InvalidCommand, isRunUntil, localApprover, localReviser, RUN_UNTIL, runWorkItem, type RunContext } from "@ceh/factory-orchestrator";
 import type { Target } from "@ceh/factory-target";
 
 /** Exit codes of the CLI. */
@@ -198,7 +198,19 @@ async function ownerCommand(command: Extract<Command, { name: "command" }>, targ
   const ctx = { ...(await env.runContext(target)), db: env.db, target };
   let outcome;
   try {
-    outcome = await handleCommand({ db: env.db, forge: ctx.forge, target, approve: localApprover(ctx) }, command.issueNumber, command.commentId);
+    outcome = await handleCommand(
+      {
+        db: env.db,
+        forge: ctx.forge,
+        target,
+        approve: localApprover(ctx),
+        revise: localReviser(),
+        // A question runs its session here, in the subscription mode of ADR 0006.
+        question: { runRole: ctx.runRole, proposalAuthor: ctx.role, architect: ctx.architect, ...(ctx.home === undefined ? {} : { home: ctx.home }) },
+      },
+      command.issueNumber,
+      command.commentId,
+    );
   } catch (error) {
     if (!(error instanceof InvalidCommand)) throw error;
     env.err(`factory: nothing done: ${error.message}\n`);

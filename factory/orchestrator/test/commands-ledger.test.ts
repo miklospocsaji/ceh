@@ -19,7 +19,8 @@ import {
 import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
 import { testTarget } from "@ceh/factory-target/testing";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cloudApprover, type TaskTokens } from "../src/approval.ts";
+import { loadRole, type Role } from "@ceh/factory-roles";
+import { cloudApprover, cloudReviser, type TaskTokens } from "../src/approval.ts";
 import { handleCommand, InvalidCommand, type CommandContext, type CommandOutcome } from "../src/commands/handle.ts";
 
 const TARGET = testTarget();
@@ -47,8 +48,10 @@ class FakeTaskTokens implements TaskTokens {
 let db: TestDatabase;
 let forge: FakeForge;
 let taskTokens: FakeTaskTokens;
+let roles: { proposalAuthor: Role; architect: Role };
 
 beforeAll(async () => {
+  roles = { proposalAuthor: await loadRole("proposal-author", TARGET), architect: await loadRole("architect", TARGET) };
   db = await createTestDatabase("commands_ledger");
   await migrate(db.pool);
   return () => db.close();
@@ -70,7 +73,13 @@ afterEach(async () => {
 
 function context(): CommandContext {
   const base = { db: db.pool, forge, target: TARGET };
-  return { ...base, approve: cloudApprover({ ...base, taskTokens }) };
+  return {
+    ...base,
+    approve: cloudApprover({ ...base, taskTokens }),
+    revise: cloudReviser({ ...base, taskTokens }),
+    // No session runs in these tests: a question would need the forge's remote.
+    question: { runRole: () => Promise.reject(new Error("no session in these tests")), proposalAuthor: roles.proposalAuthor, architect: roles.architect },
+  };
 }
 
 /** Seeds an owner comment on the forge and returns its id. */
@@ -134,7 +143,7 @@ describe("handleCommand: the ledger's record of a command", () => {
     const workItem = await awaiting();
     const status = posted("/status\nAnd how much so far?");
     const typo = posted("/Approve");
-    const later = posted("/revise make it shorter");
+    const later = posted("/abort make it shorter");
 
     await handleCommand(context(), ISSUE, status);
     await handleCommand(context(), ISSUE, typo);
@@ -143,7 +152,7 @@ describe("handleCommand: the ledger's record of a command", () => {
     expect((await listComments(db.pool, workItem.id)).map(({ verb, body, outcome, stateMet }) => ({ verb, body, outcome, stateMet }))).toEqual([
       { verb: "status", body: "/status\nAnd how much so far?", outcome: "applied", stateMet: "awaiting-proposal-approval" },
       { verb: "Approve", body: "/Approve", outcome: "unknown", stateMet: "awaiting-proposal-approval" },
-      { verb: "revise", body: "/revise make it shorter", outcome: "refused", stateMet: "awaiting-proposal-approval" },
+      { verb: "abort", body: "/abort make it shorter", outcome: "refused", stateMet: "awaiting-proposal-approval" },
     ]);
   });
 

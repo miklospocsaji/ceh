@@ -10,20 +10,20 @@ No Forge or GitHub App change: the handler uses `getComment`, `comment` and `clo
 
 ### Roles
 
-- [ ] 1.1 Failing tests for `whatChanged` on `ProposalResult` and `DesignResult` and the new `QuestionAnswer` schema in `factory/artifacts`. No scenario on its own.
-- [ ] 1.2 Write the schemas.
-- [ ] 1.3 Failing tests for `questionRole` and the question overlay, with a fake session. Scenarios:
+- [x] 1.1 Failing tests for `whatChanged` on `ProposalResult` and `DesignResult` and the new `QuestionAnswer` schema in `factory/artifacts`. No scenario on its own.
+- [x] 1.2 Write the schemas.
+- [x] 1.3 Failing tests for `questionRole` and the question overlay, with a fake session. Scenarios:
   - Question session has only read tools
   - Question session cannot write even when asked
-- [ ] 1.4 Write `factory/roles/src/question.ts` and `factory/roles/overlays/question.md`.
-- [ ] 1.5 Failing prompt tests. Scenarios:
+- [x] 1.4 Write `factory/roles/src/question.ts` and `factory/roles/overlays/question.md`.
+- [x] 1.5 Failing prompt tests. Scenarios:
   - Revision prompt carries the owner's feedback
   - Owner comment is fenced as data
-- [ ] 1.6 Write `ownerFeedback` in `renderPrompt` and `factory/roles/overlays/revision.md`. Ask the proposal author and the architect, in their prompts, to record the reasons for their choices (section 5); no scenario.
+- [x] 1.6 Write `ownerFeedback` in `renderPrompt` and `factory/roles/overlays/revision.md`. Ask the proposal author and the architect, in their prompts, to record the reasons for their choices (section 5); no scenario.
 
 ### Handlers
 
-- [ ] 1.7 Failing Proposal and Design tests with fake sessions. Scenarios:
+- [x] 1.7 Failing Proposal and Design tests with fake sessions. Scenarios:
   - Revise sends the proposal back to its author (handler half: attempt 2's input, the commit)
   - Revise sends the design back to the architect (handler half)
   - Revised proposal keeps the owner's branch edits
@@ -31,8 +31,8 @@ No Forge or GitHub App change: the handler uses `getComment`, `comment` and `clo
   - Revision gets its own attempts
   - Revision attempt names its comments
   - Later roles do not see the owner's comments
-- [ ] 1.8 Write the revision run in `proposal.ts` and `design.ts`, and the "What changed" section and the commands in `summary.ts`. Scenario: Summary shows the cost (its text changed).
-- [ ] 1.9 Failing command-handler tests. Scenarios:
+- [x] 1.8 Write the revision run in `proposal.ts` and `design.ts`, and the "What changed" section and the commands in `summary.ts`. Scenario: Summary shows the cost (its text changed).
+- [x] 1.9 Failing command-handler tests. Scenarios:
   - Revise without text is refused
   - Sixth revision is refused
   - Revision over the budget is refused
@@ -47,15 +47,15 @@ No Forge or GitHub App change: the handler uses `getComment`, `comment` and `clo
   - Revise during the build is answered
   - Question with the pull request open is answered
   - Question attempt is recorded with its comment
-- [ ] 1.10 Write the `/revise` and `/question` branches of the command handler, replacing their interim replies.
-- [ ] 1.11 Failing CLI test, then the code. Scenario: Local revision runs on the next run.
+- [x] 1.10 Write the `/revise` and `/question` branches of the command handler, replacing their interim replies.
+- [x] 1.11 Failing CLI test, then the code. Scenario: Local revision runs on the next run.
 
 ## Step 2: Network and data stack
 
 No network or IAM change.
 
-- [ ] 2.1 Failing tests against the local Postgres for migration 0006 and its queries. Scenario: Closed approval records its outcome. Also: approvals closed before the migration read `approved`; a closed approval without an outcome is refused.
-- [ ] 2.2 Write `factory/ledger/migrations/0006_approval_feedback.sql` and the queries.
+- [x] 2.1 Failing tests against the local Postgres for migration 0006 and its queries. Scenario: Closed approval records its outcome. Also: approvals closed before the migration read `approved`; a closed approval without an outcome is refused.
+- [x] 2.2 Write `factory/ledger/migrations/0006_approval_feedback.sql` and the queries.
 - [ ] 2.3 Amend ADR 0015 (`/revise`, `/question`, the limits and the budget check).
 
 ## Step 3: State machine and Lambdas

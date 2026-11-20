@@ -1,7 +1,9 @@
 /**
  * The replies to owner commands (add-owner-commands design, "Replies"): fixed templates, with only
  * these values filled in: the verb, the quoted first line, the change id, the state, the pull
- * request's link and the `/status` figures. No error message ever reaches a reply.
+ * request's link, the `/status` figures, and for `/revise` and `/question` (add-approval-feedback)
+ * the cost figures, the commit read and the question session's answer. No error message ever
+ * reaches a reply.
  */
 import type { WorkItemRow } from "@ceh/factory-ledger";
 import { KNOWN_VERBS, type Command, type KnownVerb } from "./parse.ts";
@@ -20,8 +22,8 @@ const HELP: Record<KnownVerb, { when: string; does: string }> = {
   help: { when: "always", does: "replies with this table" },
 };
 
-/** Interim, until add-approval-feedback and add-work-item-resume land (design, "Interim replies"). */
-const NOT_YET_AVAILABLE: readonly KnownVerb[] = ["revise", "question", "abort", "resume"];
+/** Interim, until add-work-item-resume lands (add-owner-commands design, "Interim replies"). */
+const NOT_YET_AVAILABLE: readonly KnownVerb[] = ["abort", "resume"];
 
 /** The `/help` reply: one table, built from the parser's verbs. */
 export function helpReply(): string {
@@ -67,6 +69,83 @@ export function resumeFailedReply(workItem: WorkItemRow, approval: "proposal" | 
   return `Your approval of ${subject} did not go through: the factory could not resume the work item, so it still awaits your approval. Reply \`/approve\` again to retry.`;
 }
 
+/** What awaits approval, as a reply names it. */
+export type StageName = "proposal" | "design";
+
+const AUTHOR: Record<StageName, string> = { proposal: "proposal author", design: "architect" };
+
+function subject(stage: StageName, workItem: WorkItemRow): string {
+  return stage === "design" ? `the design of \`${workItem.changeId}\`` : `the proposal \`${workItem.changeId}\``;
+}
+
+function usd(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+function capital(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function reviseNeedsTextReply(command: Command): string {
+  return `${quote(command)}\n\n\`/revise\` needs the answers or changes you want after the verb, such as \`/revise Use SQLite, not CSV, for the export\`. Nothing was done, and the approval is still open.`;
+}
+
+export function questionNeedsTextReply(command: Command): string {
+  return `${quote(command)}\n\n\`/question\` needs the question after the verb, such as \`/question Why is the importer in the domain package?\`. No session ran, and the approval is still open.`;
+}
+
+export function revisionLimitReply(command: Command, workItem: WorkItemRow, stage: StageName, limit: number): string {
+  return `${quote(command)}\n\n${capital(subject(stage, workItem))} has reached the limit of ${String(limit)} revisions, so this \`/revise\` was not applied. Approve it as it is with \`/approve\`, or open a new issue that says what you want. The approval is still open.`;
+}
+
+export function questionLimitReply(command: Command, workItem: WorkItemRow, stage: StageName, limit: number): string {
+  return `${quote(command)}\n\n${capital(subject(stage, workItem))} has reached the limit of ${String(limit)} questions, so no session ran. Reply \`/approve\` or \`/revise\`. The approval is still open.`;
+}
+
+export function overBudgetReply(command: Command, costUsd: number, sessionUsd: number, budgetUsd: number): string {
+  return `${quote(command)}\n\nThe work item's estimated cost so far is ${usd(costUsd)}. With this session's budget of ${usd(sessionUsd)} it could exceed the target's budget of ${usd(budgetUsd)} per work item, so your \`/${command.written}\` was not applied. The approval is still open.`;
+}
+
+export function revisedReply(workItem: WorkItemRow, stage: StageName): string {
+  return `The ${AUTHOR[stage]} revises ${subject(stage, workItem)} with your comment, from the branch's head. The work item is now \`${stage}\`, and the factory will ask for your approval again.`;
+}
+
+export function reviseFailedReply(workItem: WorkItemRow, stage: StageName): string {
+  return `Your revision of ${subject(stage, workItem)} did not go through: the factory could not resume the work item, so it still awaits your approval. Reply \`/revise\` again to retry.`;
+}
+
+/** A `/question` while another question's answer is being written. */
+export function questionBusyReply(command: Command): string {
+  return `${quote(command)}\n\nAn answer to an earlier \`/question\` is being written, so your \`/question\` was not applied and is not kept. Send it again once that answer is posted.`;
+}
+
+export interface AnswerReply {
+  command: Command;
+  workItem: WorkItemRow;
+  stage: StageName;
+  answer: string;
+  /** The commit the session read. */
+  commit: string;
+  /** Whether the approval the question was asked under is still open. */
+  stillOpen: boolean;
+  /** The work item's state now. */
+  state: string;
+}
+
+/** The answer to a `/question`, naming the commit it read and whether the approval is still open. */
+export function answerReply(reply: AnswerReply): string {
+  const { command, workItem, stage, answer, commit, stillOpen, state } = reply;
+  const after = stillOpen
+    ? "The approval is still open: reply `/approve`, `/revise` or `/question`."
+    : `Since you asked, the work item has moved on: it is \`${state}\` now, so this answer is about the version at that commit.`;
+  const source = `Answered by a read-only session of the ${AUTHOR[stage]} from commit \`${commit}\` of \`${workItem.branch}\`. It changed nothing.`;
+  return [quote(command), answer.trim(), `${source} ${after}`].join("\n\n");
+}
+
+export function answerFailedReply(command: Command, stage: StageName): string {
+  return `${quote(command)}\n\nThe question was not answered: the ${AUTHOR[stage]}'s question session ended without an answer. Nothing changed, and the approval is still open; ask it again with \`/question\`.`;
+}
+
 export function designApprovedReply(workItem: WorkItemRow): string {
   return `The design of \`${workItem.changeId}\` is approved. The work item goes on to Plan.`;
 }
@@ -108,9 +187,9 @@ export function statusReply(figures: StatusFigures | undefined): string {
 function waitsFor(state: string): string {
   switch (state) {
     case "awaiting-proposal-approval":
-      return "The factory waits for your approval of the proposal: reply `/approve`.";
+      return "The factory waits for your approval of the proposal: reply `/approve`, `/revise` or `/question`.";
     case "awaiting-design-approval":
-      return "The factory waits for your approval of the design: reply `/approve`.";
+      return "The factory waits for your approval of the design: reply `/approve`, `/revise` or `/question`.";
     case "pr-open":
       return "The factory waits for your review of the pull request.";
     case "escalated":

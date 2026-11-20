@@ -2,8 +2,9 @@
  * The comment posted on the issue when a run stops after Proposal: why and what changes
  * (from the pushed `proposal.md`), the affected capabilities, complexity and open questions
  * (from the proposal author's result), and where to review it. In the cloud it also shows the
- * proposal's cost and ends by asking the owner to reply `/approve`; the local CLI's summary
- * stays as in M1. A `large` change's design gets a summary of its own, for the owner's approval.
+ * proposal's cost and ends with the commands that apply (`/approve`, `/revise`, `/question`); the
+ * local CLI's summary stays as in M1. A `large` change's design gets a summary of its own, for the
+ * owner's approval. After a revision, both say what changed (add-approval-feedback).
  */
 import type { DesignResult, ProposalResult } from "@ceh/factory-artifacts";
 import type { AuthMode, TokenUsage } from "@ceh/factory-ledger";
@@ -25,18 +26,23 @@ export interface ProposalSummaryInput {
   proposal?: string;
   /** Shown as a cost line when given. */
   cost?: ProposalCost;
-  /** Ends the comment with the instruction to reply `/approve`. */
+  /** Ends the comment with the commands that apply. */
   askForApproval?: boolean;
+  /** After a revision: the author's `whatChanged`. */
+  whatChanged?: string;
 }
 
-/** The comment's last paragraph in the cloud. */
-export const APPROVAL_INSTRUCTION = "To approve the proposal, reply `/approve` on this issue.";
+/** The last paragraph of both summaries in the cloud: the commands that apply (docs/m3.5-owner-commands.md, section 4). */
+export const COMMANDS_INSTRUCTION = "Reply `/approve`, `/revise` with your answers or the changes you want, or `/question` to ask about it.";
+
+/** The proposal summary's last paragraph in the cloud. */
+export const APPROVAL_INSTRUCTION = COMMANDS_INSTRUCTION;
 
 /** The design summary's last paragraph. */
-export const DESIGN_APPROVAL_INSTRUCTION = "To approve the design, reply `/approve` on this issue.";
+export const DESIGN_APPROVAL_INSTRUCTION = COMMANDS_INSTRUCTION;
 
 export function renderProposalSummary(input: ProposalSummaryInput): string {
-  const { changeId, branch, result, proposal = "", cost, askForApproval = false } = input;
+  const { changeId, branch, result, proposal = "", cost, askForApproval = false, whatChanged } = input;
   const why = section(proposal, "Why");
   const what = section(proposal, "What Changes");
   const questions = result.openQuestions.length === 0 ? ["None."] : result.openQuestions.map((question) => `- ${question}`);
@@ -44,6 +50,7 @@ export function renderProposalSummary(input: ProposalSummaryInput): string {
   return [
     `## Proposal ready: \`${changeId}\``,
     result.summary,
+    ...changed(whatChanged),
     ...(why === undefined ? [] : ["### Why", why]),
     ...(what === undefined ? [] : ["### What changes", what]),
     [
@@ -67,6 +74,8 @@ export interface DesignSummaryInput {
   result: DesignResult;
   /** What Design cost, over all its attempts. */
   cost: ProposalCost;
+  /** After a revision: the architect's `whatChanged`. */
+  whatChanged?: string;
 }
 
 /**
@@ -74,12 +83,13 @@ export interface DesignSummaryInput {
  * the decisions that need an ADR, its open questions and cost, and the approval instruction.
  */
 export function renderDesignSummary(input: DesignSummaryInput): string {
-  const { changeId, branch, result, cost } = input;
+  const { changeId, branch, result, cost, whatChanged } = input;
   const list = (items: readonly string[], none: string, code = false) =>
     items.length === 0 ? none : items.map((item) => `- ${code ? `\`${item}\`` : item}`).join("\n");
   return [
     `## Design ready: \`${changeId}\``,
     result.summary,
+    ...changed(whatChanged),
     [`- **Change id:** \`${changeId}\``, `- **Branch:** \`${branch}\``, `- **Cost:** ${costLine(cost)}`].join("\n"),
     "### Contracts",
     list(result.contracts, "No contract changes.", true),
@@ -90,6 +100,11 @@ export function renderDesignSummary(input: DesignSummaryInput): string {
     `Review \`openspec/changes/${changeId}/design.md\` on branch \`${branch}\`. The work item is now \`awaiting-design-approval\`.`,
     DESIGN_APPROVAL_INSTRUCTION,
   ].join("\n\n");
+}
+
+/** The "What changed" section, when there is something to say. */
+function changed(whatChanged: string | undefined): string[] {
+  return whatChanged === undefined || whatChanged.trim() === "" ? [] : ["### What changed", whatChanged.trim()];
 }
 
 const count = (n: number): string => n.toLocaleString("en-US");

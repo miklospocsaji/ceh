@@ -22,6 +22,7 @@ import {
   reopenApproval,
   setWorkItemState,
   type ApprovalKind,
+  type AttemptRow,
   type AuthMode,
   type Db,
   type WorkItemRow,
@@ -72,7 +73,7 @@ export async function awaitApproval(ctx: AwaitApprovalContext, workItem: WorkIte
 }
 
 async function proposalSummary(ctx: AwaitApprovalContext, workItem: WorkItemRow): Promise<string> {
-  const result = await proposalResult(ctx, workItem);
+  const { result, whatChanged } = await proposalResult(ctx, workItem);
   const cost = await proposalCost(ctx, workItem);
   const proposal = await ctx.readProposal?.(workItem);
   return renderProposalSummary({
@@ -82,17 +83,21 @@ async function proposalSummary(ctx: AwaitApprovalContext, workItem: WorkItemRow)
     ...(proposal === undefined ? {} : { proposal }),
     cost,
     askForApproval: true,
+    ...(whatChanged === undefined ? {} : { whatChanged }),
   });
 }
 
 async function designSummary(ctx: AwaitApprovalContext, workItem: WorkItemRow): Promise<string> {
   const accepted = (await listAttempts(ctx.db, workItem.id)).filter((attempt) => attempt.state === "design" && attempt.outcome === "succeeded").at(-1);
   if (accepted === undefined) throw new Error(`work item ${workItem.changeId} has no succeeded design attempt`);
+  const result = DesignResult.parse(accepted.result);
+  const whatChanged = revisedWhatChanged(accepted, result.whatChanged);
   return renderDesignSummary({
     changeId: workItem.changeId,
     branch: workItem.branch,
-    result: DesignResult.parse(accepted.result),
+    result,
     cost: await stateCost(ctx, workItem, ["design", "design-review"]),
+    ...(whatChanged === undefined ? {} : { whatChanged }),
   });
 }
 
@@ -131,7 +136,7 @@ export async function approve(ctx: ApproveContext, workItem: WorkItemRow, by: st
   if (workItem.state !== AWAITING && workItem.state !== AWAITING_DESIGN) {
     throw new NotApplicable(`work item ${workItem.changeId} is ${workItem.state}, not awaiting approval`);
   }
-  const approval = await closeApproval(ctx.db, workItem.id, by);
+  const approval = await closeApproval(ctx.db, workItem.id, by, "approved");
   if (approval === undefined) return { kind: "nothing-awaits", workItem };
 
   try {
@@ -219,12 +224,21 @@ export async function escalateWorkItem(ctx: HandlerContext, issueNumber: number,
   return workItem === undefined ? undefined : setWorkItemState(ctx.db, workItem.id, ESCALATED);
 }
 
-/** The result of the work item's succeeded proposal attempt, stored in the ledger. */
-async function proposalResult(ctx: HandlerContext, workItem: WorkItemRow): Promise<ProposalResult> {
+/**
+ * The result of the work item's last succeeded proposal attempt, stored in the ledger, and what it
+ * changed if it was a revision.
+ */
+export async function proposalResult(ctx: Pick<HandlerContext, "db">, workItem: WorkItemRow): Promise<{ result: ProposalResult; whatChanged: string | undefined }> {
   const succeeded = (await listAttempts(ctx.db, workItem.id)).filter((attempt) => attempt.state === PROPOSAL && attempt.outcome === "succeeded");
   const last = succeeded.at(-1);
   if (last === undefined) throw new Error(`work item ${workItem.changeId} has no succeeded proposal attempt`);
-  return ProposalResult.parse(last.result);
+  const result = ProposalResult.parse(last.result);
+  return { result, whatChanged: revisedWhatChanged(last, result.whatChanged) };
+}
+
+/** A revision's `whatChanged`: only an attempt given the owner's comments is a revision. */
+function revisedWhatChanged(attempt: AttemptRow, whatChanged: string | undefined): string | undefined {
+  return attempt.commentIds.length > 0 ? whatChanged : undefined;
 }
 
 /** Tokens, estimated cost and auth modes over all the work item's proposal attempts. */
@@ -244,4 +258,57 @@ export async function stateCost(ctx: HandlerContext, workItem: WorkItemRow, stat
     usd: attempts.reduce((total, attempt) => total + (attempt.costUsdEstimate ?? 0), 0),
     authModes,
   };
+}
+
+/**
+ * - `revised`: the approval of `approval`'s kind is closed as `revise`, the work item is back in
+ *   `proposal` or `design`, and the execution resumed with the decision `revise`.
+ * - `nothing-awaits`: there was no open approval; nothing changed.
+ * - `resume-failed`: resuming failed; the approval is open again and the state restored.
+ */
+export type ReviseOutcome =
+  | { kind: "revised"; workItem: WorkItemRow; approval: ApprovalKind }
+  | { kind: "nothing-awaits"; workItem: WorkItemRow }
+  | { kind: "resume-failed"; workItem: WorkItemRow; approval: ApprovalKind; error: unknown };
+
+/**
+ * Applies the owner's `/revise` to a work item awaiting approval, after the command handler's
+ * checks; `by` is the owner's login. It writes through `db`: the handler's transaction.
+ */
+export type Reviser = (workItem: WorkItemRow, by: string, db: Db) => Promise<ReviseOutcome>;
+
+/**
+ * The output a revised approval's task gets: a fixed word, so the execution history holds the
+ * decision and never the comment (add-approval-feedback design, "State machine").
+ */
+export const REVISE_OUTPUT = JSON.stringify({ decision: "revise" });
+
+/** Where a `/revise` sends the work item back to, by the state it awaits approval in. */
+const REVISED_STATE: Record<string, WorkItemState> = { [AWAITING]: PROPOSAL, [AWAITING_DESIGN]: "design" };
+
+/**
+ * The effect of the owner's `/revise` in the cloud: closes the open approval as `revise`, puts the
+ * work item back in `proposal` (or `design`), and resumes the execution with the decision
+ * `revise`, which runs Proposal (or Design) again. If resuming fails, the approval is reopened and
+ * the state restored, so the owner can send `/revise` again.
+ */
+export async function revise(ctx: ApproveContext, workItem: WorkItemRow, by: string): Promise<ReviseOutcome> {
+  const back = REVISED_STATE[workItem.state];
+  if (back === undefined) throw new NotApplicable(`work item ${workItem.changeId} is ${workItem.state}, not awaiting approval`);
+  const approval = await closeApproval(ctx.db, workItem.id, by, "revise");
+  if (approval === undefined) return { kind: "nothing-awaits", workItem };
+  const moved = await setWorkItemState(ctx.db, workItem.id, back);
+  try {
+    await ctx.taskTokens.succeed(approval.taskToken, REVISE_OUTPUT);
+  } catch (error) {
+    await reopenApproval(ctx.db, approval.id);
+    await setWorkItemState(ctx.db, workItem.id, workItem.state);
+    return { kind: "resume-failed", workItem, approval: approval.kind, error };
+  }
+  return { kind: "revised", workItem: moved, approval: approval.kind };
+}
+
+/** `revise` with Step Functions, as the `command` worker task applies it. */
+export function cloudReviser(ctx: ApproveContext): Reviser {
+  return (workItem, by, db) => revise({ ...ctx, db }, workItem, by);
 }
