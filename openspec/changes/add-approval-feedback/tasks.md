@@ -72,7 +72,7 @@ The webhook does not change.
 
 The M3.5 exit run (section 11) follows the third change. This step checks the revision loop and a question in the cloud.
 
-- [ ] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show the state machine's new definition and new images, and no replacement of a stateful resource. Show it to the owner.
-- [ ] 4.2 Owner confirms, with no execution paused at an approval; `pnpm infra:deploy`. The first worker task applies migration 0006.
-- [ ] 4.3 On a throwaway `vocab` issue the owner agrees to, whose proposal lists an open question: the owner asks a `/question`, then answers the open question with `/revise`. Confirm the answer arrives with the approval open, and the revised proposal reflects the answer, no longer lists the question, and is posted with "What changed". Then `/approve`. Record cost and timings in `design.md` under "Cloud results". Run `pnpm test:cloud`.
-- [ ] 4.4 Run `pnpm check`, `pnpm gates coverage --change add-approval-feedback --tests factory`, and `pnpm test:live` for one real question session within its $0.30. Update `CLAUDE.md` ("Cloud runs": `/revise` and `/question`). The change is archived at M3.5's exit.
+- [x] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show the state machine's new definition and new images, and no replacement of a stateful resource. Show it to the owner.
+- [x] 4.2 Owner confirms, with no execution paused at an approval; `pnpm infra:deploy`. The first worker task applies migration 0006.
+- [x] 4.3 On a throwaway `vocab` issue the owner agrees to, whose proposal lists an open question: the owner asks a `/question`, then answers the open question with `/revise`. Confirm the answer arrives with the approval open, and the revised proposal reflects the answer, no longer lists the question, and is posted with "What changed". Then `/approve`. Record cost and timings in `design.md` under "Cloud results". Run `pnpm test:cloud`.
+- [x] 4.4 Run `pnpm check`, `pnpm gates coverage --change add-approval-feedback --tests factory`, and `pnpm test:live` for one real question session within its $0.30 (`factory/roles/test/question.live.test.ts`). Update `CLAUDE.md` ("Cloud runs": `/revise` and `/question`). The change is archived at M3.5's exit.
