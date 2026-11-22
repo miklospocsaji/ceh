@@ -16,14 +16,14 @@ No GitHub App change: `issues.closed` is part of the Issues events the App alrea
 
 Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App requests").
 
-- [ ] 1.1 Failing tests for `createInstallationTokenProvider` and `appCommitter` with an injected `fetch` and sleep. Scenarios:
+- [x] 1.1 Failing tests for `createInstallationTokenProvider` and `appCommitter` with an injected `fetch` and sleep. Scenarios:
   - Token request is retried after a network error
   - Token request is not retried after a refusal
   - Network failure names its code
 
   Also: the bot lookup is retried the same way; a 5xx is retried; a cause whose `code` is not a plain code is left out; the four carried scenarios of "The factory acts as its GitHub App" still pass.
-- [ ] 1.2 Write the retries and the code in `factory/forge/src/github-app.ts`.
-- [ ] 1.3 Failing worker tests, then the code in `factory/worker/src/main.ts`. Scenarios:
+- [x] 1.2 Write the retries and the code in `factory/forge/src/github-app.ts`.
+- [x] 1.3 Failing worker tests, then the code in `factory/worker/src/main.ts`. Scenarios:
   - Command that fails before its handler is answered
   - Command that cannot reach GitHub is logged
 

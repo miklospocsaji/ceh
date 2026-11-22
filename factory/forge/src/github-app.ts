@@ -4,6 +4,11 @@
  * installation token scoped to one repository with the factory's permissions, and caches the
  * token until five minutes before it expires.
  *
+ * The token request and the bot user's lookup are tried up to 3 times, 2 s and then 5 s apart,
+ * after a network error or a 5xx (add-work-item-resume): every worker task makes both at start-up,
+ * and repeating them changes nothing. The Forge's other calls are not retried here, since a
+ * comment or a push repeated after a connection reset could be done twice.
+ *
  * The key, the JWT and the token live only in this closure, never in an object that could be
  * inspected or serialised, and no error message carries any of them.
  */
@@ -24,7 +29,12 @@ export interface InstallationTokenProviderOptions {
   fetch?: typeof fetch;
   /** The REST API root; defaults to `https://api.github.com`. */
   baseUrl?: string;
+  /** Waits between tries; tests inject one that does not wait. */
+  sleep?: Sleep;
 }
+
+/** Resolves after `ms` milliseconds. */
+export type Sleep = (ms: number) => Promise<void>;
 
 /** ADR 0009: exactly these, and pull requests join in M3. */
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" } as const;
@@ -45,15 +55,15 @@ interface CachedToken {
 export function createInstallationTokenProvider(options: InstallationTokenProviderOptions): TokenProvider {
   const { appId, installationId, privateKey, repository } = options;
   const fetchFn = options.fetch ?? fetch;
+  const sleep = options.sleep ?? defaultSleep;
   const url = `${(options.baseUrl ?? "https://api.github.com").replace(/\/+$/, "")}/app/installations/${String(installationId)}/access_tokens`;
   let cached: CachedToken | undefined;
   let pending: Promise<string> | undefined;
 
   const request = async (): Promise<string> => {
     const jwt = appJwt(appId, privateKey);
-    let response: Response;
-    try {
-      response = await fetchFn(url, {
+    const { response, body } = await tryRequest(WHAT, [jwt], sleep, () =>
+      fetchFn(url, {
         method: "POST",
         headers: {
           accept: "application/vnd.github+json",
@@ -62,18 +72,8 @@ export function createInstallationTokenProvider(options: InstallationTokenProvid
           "x-github-api-version": "2022-11-28",
         },
         body: JSON.stringify({ repositories: [repository], permissions: PERMISSIONS }),
-      });
-    } catch (error) {
-      // No `cause`: a fetch error may carry the request, and with it the JWT.
-      throw new ForgeError(`${WHAT}: ${scrub(messageOf(error), [jwt])}`, "failed");
-    }
-
-    const body = await readJson(response);
-    if (!response.ok) {
-      const kind: ForgeErrorKind = response.status === 401 ? "unauthorized" : response.status === 404 ? "not-found" : "failed";
-      const detail = typeof body?.["message"] === "string" ? ` ${body["message"]}` : "";
-      throw new ForgeError(`${WHAT}: ${String(response.status)}${scrub(detail, [jwt])}`, kind, response.status);
-    }
+      }),
+    );
     const token = body?.["token"];
     const expiresAt = typeof body?.["expires_at"] === "string" ? Date.parse(body["expires_at"]) : Number.NaN;
     if (typeof token !== "string" || token === "" || Number.isNaN(expiresAt)) {
@@ -91,6 +91,50 @@ export function createInstallationTokenProvider(options: InstallationTokenProvid
     });
     return pending;
   };
+}
+
+/** How often a request is tried, and the waits between the tries. */
+const TRIES = 3;
+const WAITS_MS = [2_000, 5_000] as const;
+/** A cause's `code` such as `UND_ERR_CONNECT_TIMEOUT`; anything else from the cause is left out. */
+const PLAIN_CODE = /^[A-Z][A-Z0-9_]*$/;
+
+const defaultSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Tries a request that is safe to repeat up to TRIES times, while `fetch` rejects or GitHub
+ * answers with a 5xx; any other answer is final at once. Resolves to a 2xx response and its JSON
+ * body, and otherwise rejects with a ForgeError whose message holds none of `secrets` and,
+ * from a rejected `fetch`, only its message and its cause's code.
+ */
+async function tryRequest(what: string, secrets: string[], sleep: Sleep, send: () => Promise<Response>): Promise<{ response: Response; body: Record<string, unknown> | undefined }> {
+  for (let tried = 1; ; tried += 1) {
+    let failure: ForgeError;
+    let retryable: boolean;
+    const prefix = (exhausted: boolean) => (exhausted ? `${what} ${String(TRIES)} times` : what);
+    try {
+      const response = await send();
+      const body = await readJson(response);
+      if (response.ok) return { response, body };
+      const kind: ForgeErrorKind = response.status === 401 ? "unauthorized" : response.status === 404 ? "not-found" : "failed";
+      const detail = typeof body?.["message"] === "string" ? ` ${body["message"]}` : "";
+      retryable = response.status >= 500;
+      failure = new ForgeError(`${prefix(retryable && tried === TRIES)}: ${String(response.status)}${scrub(detail, secrets)}`, kind, response.status);
+    } catch (error) {
+      // No `cause`: a fetch error may carry the request, and with it the credential.
+      retryable = true;
+      failure = new ForgeError(`${prefix(tried === TRIES)}: ${scrub(networkDetail(error), secrets)}`, "failed");
+    }
+    if (!retryable || tried === TRIES) throw failure;
+    await sleep(WAITS_MS[tried - 1] ?? WAITS_MS[1]);
+  }
+}
+
+/** A rejected fetch's message, with its cause's code when that is a plain code. */
+function networkDetail(error: unknown): string {
+  const cause: unknown = error instanceof Error ? error.cause : undefined;
+  const code: unknown = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === "string" && PLAIN_CODE.test(code) ? `${messageOf(error)} (${code})` : messageOf(error);
 }
 
 /** An RS256 JWT issued by the App, valid for under 10 minutes. */
@@ -136,6 +180,7 @@ export interface AppCommitterOptions {
   token?: TokenProvider;
   fetch?: typeof fetch;
   baseUrl?: string;
+  sleep?: Sleep;
 }
 
 /**
@@ -151,18 +196,8 @@ export async function appCommitter(options: AppCommitterOptions): Promise<{ name
   if (token !== undefined) headers["authorization"] = `token ${token}`;
   const secrets = token === undefined ? [] : [token];
 
-  let response: Response;
-  try {
-    response = await (options.fetch ?? fetch)(url, { headers });
-  } catch (error) {
-    throw new ForgeError(`${what}: ${scrub(messageOf(error), secrets)}`, "failed");
-  }
-  const body = await readJson(response);
-  if (!response.ok) {
-    const kind: ForgeErrorKind = response.status === 401 ? "unauthorized" : response.status === 404 ? "not-found" : "failed";
-    const detail = typeof body?.["message"] === "string" ? ` ${body["message"]}` : "";
-    throw new ForgeError(`${what}: ${String(response.status)}${scrub(detail, secrets)}`, kind, response.status);
-  }
+  const fetchFn = options.fetch ?? fetch;
+  const { response, body } = await tryRequest(what, secrets, options.sleep ?? defaultSleep, () => fetchFn(url, { headers }));
   const id = body?.["id"];
   if (body?.["login"] !== login || typeof id !== "number" || !Number.isSafeInteger(id)) {
     throw new ForgeError(`${what}: the response is not that bot user`, "failed", response.status);

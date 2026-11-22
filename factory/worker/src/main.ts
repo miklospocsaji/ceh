@@ -8,7 +8,8 @@
  *   ledger's secret or URL are removed from `process.env` once read, so no child process
  *   inherits them.
  * - Each connection attempt is bounded, so `runWorker`'s wait for a resuming Aurora can retry.
- * - The Forge is the factory's GitHub App (ADR 0009), and commits are its bot user's.
+ * - The Forge is the factory's GitHub App (ADR 0009), and commits are its bot user's
+ *   (`github.ts`). A `command` task whose App set-up fails still tries its fixed reply.
  * - The clone and the worktrees live in a temp home, removed at the end.
  * - Step Functions and the artifact bucket (`FACTORY_STORE_BUCKET`) are reached with the task
  *   role's credentials, in the task's region. The build task clones the repository over public
@@ -21,13 +22,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { appCommitter, createInstallationTokenProvider, GitHubForge } from "@ceh/factory-forge";
 import { DATABASE_URL_VAR, LEDGER_SECRET_VAR, LedgerRecorder } from "@ceh/factory-ledger";
 import { createRunner, loadRole } from "@ceh/factory-roles";
 import { cloneUrl, type Target } from "@ceh/factory-target";
 import pg from "pg";
 import { ENV, parseWorkerArgs, USAGE, WorkerConfigError, workerConfig } from "./config.ts";
 import type { TaskTokens } from "@ceh/factory-orchestrator";
+import { connectGitHub } from "./github.ts";
 import { STORE_ENV, storeFromEnv, type ArtifactStore } from "./store.ts";
 import { runWorker, WORKER_EXIT, type WorkerRoles } from "./worker.ts";
 
@@ -64,14 +65,10 @@ async function main(argv: string[]): Promise<number> {
   Reflect.deleteProperty(process.env, LEDGER_SECRET_VAR);
   Reflect.deleteProperty(process.env, ENV.taskToken);
 
-  const token = createInstallationTokenProvider({
-    appId: config.app.appId,
-    installationId: config.app.installationId,
-    privateKey: config.app.privateKey,
-    repository: config.repo,
-  });
-  const committer = await appCommitter({ slug: config.app.slug, token });
-  const forge = new GitHubForge({ owner: config.owner, repo: config.repo, token, committer });
+  // A `command` task whose set-up fails still answers the owner, or logs that it could not.
+  const github = await connectGitHub({ args, config, err });
+  if (!github.ok) return github.code;
+  const { forge, committer } = github;
 
   // A bounded connect, so a resuming Aurora is retried rather than waited on forever.
   const pool = new pg.Pool({ ...config.ledger, connectionTimeoutMillis: LEDGER_CONNECT_TIMEOUT_MS });
