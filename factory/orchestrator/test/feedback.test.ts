@@ -30,7 +30,7 @@ import { plan } from "../src/plan.ts";
 import { proposal, type ProposalContext } from "../src/proposal.ts";
 import { COMMANDS_INSTRUCTION } from "../src/summary.ts";
 import { CHANGE_FILES, createFakeRoleRunner, validResult, type FakeCall, type FakeStep } from "./fake-role-runner.ts";
-import { BOT, CHANGE, CHANGE_ID, git, ISSUE, planPaths, planStep, proposalStep, proposedWorkItem, remoteHead, SPEC, useWorkItemFixture } from "./work-item-fixture.ts";
+import { BOT, CHANGE, CHANGE_ID, git, ISSUE, metadata, planPaths, planStep, proposalStep, proposedWorkItem, remoteHead, SPEC, useWorkItemFixture } from "./work-item-fixture.ts";
 
 const TARGET = testTarget();
 const OWNER = TARGET.owner;
@@ -330,6 +330,23 @@ describe("/revise of a proposal", { timeout: 60_000 }, () => {
       expect(call.item.ownerFeedback, call.role).toBeUndefined();
     }
     expect(workItem.id).toBe((await current()).id);
+  });
+});
+
+describe("/revise and the route after Approved", { timeout: 60_000 }, () => {
+  it("Scenario: Revised proposal routes on its new complexity", async () => {
+    // A small change, which Approved would send straight to Plan, revised into a medium one.
+    await awaitingProposal("small");
+    await command(`/revise ${REVISE}`);
+    const revision: FakeStep = { files: { "proposal.md": REVISED_PROPOSAL, ".openspec.yaml": metadata("medium") }, result: { ...validResult(CHANGE_ID), complexity: "medium", whatChanged: WHAT_CHANGED } };
+    await proposal(proposalContext(fake([revision]).runRole), await current());
+    await awaitApproval(base(), await current(), TOKEN_2);
+    await command("/approve");
+
+    const routed = await approved({ ...base(), readChangeFile: changeFileReader({ repo: f.repo, home: f.home }) }, await current());
+
+    expect(routed).toMatchObject({ kind: "advance", route: "design", workItem: { state: "proposal-approved" } });
+    expect(taskTokens.successes.map((success) => success.output)).toEqual([JSON.stringify({ decision: "revise" }), JSON.stringify({ decision: "approve" })]);
   });
 });
 

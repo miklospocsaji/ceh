@@ -202,7 +202,7 @@ describe("design", { timeout: 30_000 }, () => {
     // One architect attempt at the fake's $0.25.
     expect(body).toContain("$0.25");
     expect(body.trim().split("\n\n").at(-1)).toBe(DESIGN_APPROVAL_INSTRUCTION);
-    expect(DESIGN_APPROVAL_INSTRUCTION).toContain("`/approve`");
+    for (const verb of ["`/approve`", "`/revise`", "`/question`"]) expect(DESIGN_APPROVAL_INSTRUCTION).toContain(verb);
     expect((await findWorkItemByIssue(f.db.pool, REPOSITORY, ISSUE.number))?.state).toBe("awaiting-design-approval");
   });
 

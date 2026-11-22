@@ -3,10 +3,12 @@
  * designs, "State machine"): a pure function returning JSONata ASL, so it is unit-tested without
  * CDK or AWS.
  *
- *   Start ─▶ Intake ─▶ Proposal ─▶ AwaitApproval ─▶ Approved ─┬─ 10 (small) ───────────────┐
- *              │ 4        │ 3                                 └─ 0 ─▶ Design ─┬─ 0 ─────────┤
- *              ▼          ▼                                                   └─ 11 ─▶ AwaitDesignApproval
- *            Ended    Escalated                                                           ▼
+ *   Start ─▶ Intake ─▶ Proposal ─▶ AwaitApproval ─▶ ApprovalDecision ─▶ Approved ─┬─ 10 (small) ───────────────┐
+ *              │ 4        │ 3                                                       └─ 0 ─▶ Design ─┬─ 0 ─────────┤
+ *              ▼          ▼                                                                         └─ 11 ─▶ AwaitDesignApproval
+ *            Ended    Escalated                                                                                  ▼
+ *                                                                                           DesignApprovalDecision
+ *   (ApprovalDecision: revise ─▶ Proposal; DesignApprovalDecision: revise ─▶ Design, approve ─▶ Plan)    ▼
  *                                         Plan (waitForTaskToken → { exitCode, changeId, tasks })
  *                                                                    ▼
  *     BuildTasks: Map over $tasks, one at a time: Step ─▶ 20 Build / 21 WaitInfra ─▶ Build ─▶ Step
@@ -83,6 +85,9 @@ const FAILED_EXIT_CODE = `$type(${CAUSE}) = 'string' and $substring(${CAUSE}, 0,
 const expr = (expression: string): string => `{% ${expression} %}`;
 const quote = (text: string): string => `'${text}'`;
 
+/** The decision `/revise` resumes an approval wait with; `/approve` sends `approve`. */
+const REVISE = "revise";
+
 /** A worker state's routes on exit codes other than its own: where refused and crashed tasks go. */
 interface Escalation {
   /** The retry counter: `tries` at the top level, `itemTries` in the Map, whose scope may not assign an outer variable. */
@@ -97,6 +102,21 @@ interface Escalation {
 const TOP: Escalation = { counter: "tries", refused: "Escalate", failed: "Escalate" };
 /** Inside the build loop: Fail states, which the Map catches into Escalate with the reason. */
 const IN_MAP: Escalation = { counter: "itemTries", refused: "StepRefused", failed: "StepFailed" };
+
+/**
+ * An approval wait's output: the owner's decision, as one of two fixed words, whatever else the
+ * worker sent, so the history holds the decision and never the comment (add-approval-feedback).
+ */
+const DECISION_OUTPUT = expr(`{ 'decision': $states.result.decision = ${quote(REVISE)} ? ${quote(REVISE)} : 'approve' }`);
+
+/** After an approval wait: `revise` back to the author's state, with its retries unused; anything else on. */
+function decisionChoice(revised: string, approved: string): Record<string, Json> {
+  return {
+    Type: "Choice",
+    Choices: [{ Condition: expr(`$states.input.decision = ${quote(REVISE)}`), Assign: { tries: 0 }, Next: revised }],
+    Default: approved,
+  };
+}
 
 export function definition(config: WorkerTaskConfig): StateMachineDefinition {
   const { build } = config;
@@ -239,8 +259,9 @@ export function definition(config: WorkerTaskConfig): StateMachineDefinition {
         { exit: WORKER_EXIT.ok, next: "AwaitApproval" },
         { exit: WORKER_EXIT.escalated, next: "Escalated" },
       ]),
-      // No timeout (add-cloud-proposal-run design, "Risks"). The approve worker's output is dropped.
-      AwaitApproval: tokenState([quote("await-approval"), quote("--issue"), ISSUE], { Output: {}, Next: "Approved" }),
+      // No timeout (add-cloud-proposal-run design, "Risks"). The owner's decision is all that is kept.
+      AwaitApproval: tokenState([quote("await-approval"), quote("--issue"), ISSUE], { Output: DECISION_OUTPUT, Next: "ApprovalDecision" }),
+      ApprovalDecision: decisionChoice("Proposal", "Approved"),
       ...workerState("Approved", [quote("approved"), quote("--issue"), ISSUE], [
         { exit: WORKER_EXIT.ok, next: "Design" },
         { exit: WORKER_EXIT.skipDesign, next: "Plan" },
@@ -251,7 +272,8 @@ export function definition(config: WorkerTaskConfig): StateMachineDefinition {
         { exit: WORKER_EXIT.ownerDesignReview, next: "AwaitDesignApproval" },
         { exit: WORKER_EXIT.escalated, next: "Escalated" },
       ]),
-      AwaitDesignApproval: tokenState([quote("await-approval"), quote("--issue"), ISSUE, quote("--kind"), quote("design")], { Output: {}, Next: "Plan" }),
+      AwaitDesignApproval: tokenState([quote("await-approval"), quote("--issue"), ISSUE, quote("--kind"), quote("design")], { Output: DECISION_OUTPUT, Next: "DesignApprovalDecision" }),
+      DesignApprovalDecision: decisionChoice("Design", "Plan"),
       // Plan hands back the change id and the unfinished task ids, which an inline Map needs in its state.
       Plan: tokenState([quote("plan"), quote("--issue"), ISSUE], {
         TimeoutSeconds: PLAN_TIMEOUT_SECONDS,

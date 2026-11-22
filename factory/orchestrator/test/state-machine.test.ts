@@ -284,6 +284,66 @@ describe("state machine definition", () => {
     expect(kinds(simulation).slice(-3)).toEqual(["step", "build", "step"]);
   });
 
+  it("Scenario: Approval decision routes the execution", async () => {
+    // The worker sends only the decision; a stray field must not reach the history either.
+    const comment = "Use SQLite, not CSV, for the export";
+    const simulation = await run({ "await-approval": [{ success: { decision: "revise", comment } }, { success: { decision: "approve" } }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 6)).toEqual(["intake", "proposal", "await-approval", "proposal", "await-approval", "approved"]);
+    const path = simulation.path.slice(0, simulation.path.indexOf("Approved") + 1);
+    expect(path.filter((state) => ["AwaitApproval", "ApprovalDecision", "Proposal", "Approved"].includes(state))).toEqual([
+      "Proposal",
+      "AwaitApproval",
+      "ApprovalDecision",
+      "Proposal",
+      "AwaitApproval",
+      "ApprovalDecision",
+      "Approved",
+    ]);
+    expect(JSON.stringify(simulation.records)).not.toContain(comment);
+    // The decision is a fixed word in the history.
+    const decisions = simulation.records.filter((record) => record.state === "AwaitApproval").map((record) => record.output);
+    expect(decisions).toEqual([{ decision: "revise" }, { decision: "approve" }]);
+
+    // The design approval routes the same way: revise to Design, approve to Plan.
+    const designed = await run({ design: [{ exit: 11 }, { exit: 11 }], "await-design-approval": [{ success: { decision: "revise", comment } }, { success: { decision: "approve" } }] });
+
+    expect(designed.status).toBe("SUCCEEDED");
+    expect(kinds(designed).slice(4, 9)).toEqual(["design", "await-design-approval", "design", "await-design-approval", "plan"]);
+    expect(designed.path).toContain("DesignApprovalDecision");
+    expect(JSON.stringify(designed.records)).not.toContain(comment);
+  });
+
+  it("Scenario: Revised proposal routes on its new complexity", async () => {
+    // Small at first; the revision makes it medium, so Approved exits 0 and the work item goes to Design.
+    const simulation = await run({ "await-approval": [{ success: { decision: "revise" } }, { success: { decision: "approve" } }], approved: [{ exit: 0 }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 8)).toEqual(["intake", "proposal", "await-approval", "proposal", "await-approval", "approved", "design", "plan"]);
+  });
+
+  it("starts a revised Proposal with its retries unused", async () => {
+    const simulation = await run({
+      proposal: [{ exit: 1 }, { exit: 0 }, { exit: 1 }, { exit: 1 }, { exit: 0 }],
+      "await-approval": [{ success: { decision: "revise" } }, { success: { decision: "approve" } }],
+    });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 9)).toEqual(["intake", "proposal", "proposal", "await-approval", "proposal", "proposal", "proposal", "await-approval", "approved"]);
+    expect(simulation.waits).toEqual([30, 30, 90]);
+  });
+
+  it("Scenario: Large design waits for the owner", async () => {
+    const simulation = await run({ design: [{ exit: 11 }], "await-design-approval": [{ success: { decision: "approve" } }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    // No design reviewer task: the execution waits for the owner's decision on the design, then plans.
+    expect(kinds(simulation).slice(4, 7)).toEqual(["design", "await-design-approval", "plan"]);
+    const path = simulation.path;
+    expect(path.slice(path.indexOf("AwaitDesignApproval"), path.indexOf("Plan") + 1)).toEqual(["AwaitDesignApproval", "DesignApprovalDecision", "Plan"]);
+  });
+
   it("Scenario: Escalated proposal ends the execution", async () => {
     const simulation = await run({ proposal: [{ exit: 3 }] });
 
@@ -410,6 +470,8 @@ describe("state machine definition", () => {
       "$states.result.exitCode",
       "$states.result.changeId",
       "$states.result.tasks",
+      "$states.result.decision",
+      "$states.input.decision",
       "$states.errorOutput.Cause",
       "$states.input.exitCode",
     ]);
@@ -438,6 +500,7 @@ describe("state machine definition", () => {
       await run({ proposal: [{ exit: 1 }, { notStarted: true }, { exit: 1 }] }),
       await run({ approved: [{ exit: 2 }] }),
       await run({ "await-approval": [{ success: leaky }] }),
+      await run({ "await-approval": [{ success: { ...leaky, decision: "revise" } }, { success: { ...leaky, decision: "## Why …" } }] }),
       await run({ design: [{ exit: 11 }], "await-design-approval": [{ success: leaky }] }),
       await run({ plan: [{ success: { ...PLANNED, ...leaky } }] }),
       await run({ step: [{ exit: 20 }, { exit: 21 }, { exit: 13 }], build: [{ exit: 1 }, { exit: 0 }] }),
@@ -466,7 +529,9 @@ describe("state machine definition", () => {
             continue;
           }
           expect(typeof value, record.state).toBe("object");
-          for (const key of Object.keys(value as object)) expect(["issueNumber", "exitCode"], `${record.state}: ${key}`).toContain(key);
+          for (const key of Object.keys(value as object)) expect(["issueNumber", "exitCode", "decision"], `${record.state}: ${key}`).toContain(key);
+          const decision = (value as { decision?: unknown }).decision;
+          if (decision !== undefined) expect(["approve", "revise"], record.state).toContain(decision);
         }
         for (const [key, value] of Object.entries(record.variables)) {
           expect(["issueNumber", "changeId", "tasks", "taskId", "tries", "itemTries", "reason"], key).toContain(key);

@@ -1,6 +1,6 @@
 # 0015 Owner commands
 
-Status: accepted (2026-11-20; owner decisions of 2026-11-15, `docs/m3.5-owner-commands.md` sections 2 and 12; add-owner-commands)
+Status: accepted (2026-11-20; owner decisions of 2026-11-15, `docs/m3.5-owner-commands.md` sections 2 and 12; add-owner-commands); amended 2026-11-20 (`/revise` and `/question`, add-approval-feedback)
 
 ## Context
 
@@ -45,3 +45,27 @@ Also considered:
 - `/approve` holds the work item's lock across one `SendTaskSuccess` call, well under a second.
 - The ledger now stores the owner's comment bodies. They are never put into an execution's history or a task override.
 - An execution paused at an approval while this deploys is approved through `command` afterwards: nothing in it names `approve`.
+
+## Amendment 2026-11-20: `/revise` and `/question`
+
+M3.5 (add-approval-feedback; `docs/m3.5-owner-commands.md` sections 4 to 6) replaces the "not yet available" answers of `/revise` and `/question`. Both are valid only while a proposal, or a `large` change's design, awaits the owner's approval; in any other state they get the replies of section 6's table, and no session runs.
+
+- **`/revise <text>` sends what awaits back to its author.** Under the work item's lock, the `command` task closes the open approval with the outcome `revise` and the owner's login, puts the work item back in `proposal` (or `design`), records the comment `applied`, and resumes the execution with `{ "decision": "revise" }`, which runs Proposal (or Design) again in the same execution (ADR 0002, amendment of 2026-11-20). If resuming fails, the approval is reopened, the state restored and the comment recorded `refused`, and the reply says the revision can be sent again. `/approve` now resumes with `{ "decision": "approve" }`.
+- **The revised author sees the owner's feedback, and later roles do not.** The proposal author (architect) gets every applied `/revise` of its stage, oldest first, and the stage's questions with their answers, each fenced as the owner's feedback, never as instructions. It runs on the branch head, so the owner's pushes are kept, and its result says what changed, which the summary shows. Later roles see only the artifacts (principle 4). The attempt records the comments it was given (`attempts.comment_ids`); a revision starts a new run with its own 3 attempts, and `n` goes on.
+- **`/question <text>` is answered with the approval left open.** The `command` task opens an attempt in state `proposal-question` (`design-question`) under the lock, releases the lock, and runs the answer outside it on a fresh clone of the branch head. The execution and the approval's token are never touched, so a `/approve` or `/revise` arriving meanwhile goes through at once. The reply quotes the question, gives the answer and names the commit it read. A failed session is a failed attempt, and the reply says the question can be asked again.
+- **Read-only by construction, not by prompt.** The answer runs the author's model and prompt with a question overlay, but with the tools `Read`, `Grep` and `Glob` only, no writable paths, no `WebFetch`, and a structured result `{ answer }`. It never commits or pushes. The overlay asks it to point to `/revise` for changes, but nothing depends on the model obeying: a question that says "fix it" still cannot write. The read guard of ADR 0007 confines its reads to the clone.
+- **Limits.** A `/revise` or `/question` without text is refused. A stage takes at most 5 applied revisions (the 6th is refused with a reply that suggests a new issue) and 10 questions. One question is answered at a time per work item: another `/question` meanwhile gets the busy reply, and a question attempt open for more than 30 minutes is closed `failed` (`abandoned`) first, so a crashed task cannot block questions for good. An answer has at most 10 turns and $0.30.
+- **The budget check.** Before it starts a session, each command checks that the work item's estimated cost so far plus the session's cap (the author's `maxBudgetUsd` for `/revise`, $0.30 for `/question`) stays within `target.budget`; otherwise it is refused with a reply naming the cost so far and the budget. This is the only enforcement of the per-work-item budget before M6, and it does not stop a role already running.
+- **Ledger** (`0006_approval_feedback.sql`): `approvals.outcome` (`approved` or `revise`), required exactly when the approval is closed; approvals closed before the migration read `approved`. `attempts.comment_ids`.
+- Applied `/revise` counts as an owner intervention; `/question` does not.
+
+Also considered:
+- **Routing questions through the state machine** (resume the token with `question`, answer, wait again): every role run would be in the execution history, but each question would need a new token and a re-posted approval prompt, and a crash mid-answer could leave the work item with no open approval.
+- **Letting `/revise` carry questions** ("answer, don't change"): mixes a change and a non-change in one command, with the author allowed to write while asked not to.
+- **Counting a revision's attempts toward the stage's first 3:** a proposal that needed 3 attempts could then never be revised. Each revision gets its own 3, as Design's run after a design flaw does.
+
+Consequences:
+- A question's answer comes from a fresh session reading the artifacts, not the author's memory: "why X?" is answered only as well as the artifacts record reasons. The proposal author's and architect's prompts now ask them to record their reasons.
+- A question's answer runs inside the `command` task and gets no Step Functions retry; a crash leaves a failed attempt and the owner asks again.
+- Five revisions of a proposal could cost more than the budget; the budget check refuses the one that would go over.
+- An execution started before this deploy runs the old definition: a `/revise` to it would send it to Approved with the work item in `proposal`, which Approved refuses, and the work item escalates. Deploy with no execution paused at an approval.

@@ -200,7 +200,7 @@ describe("handleCommand: redeliveries", () => {
 
     expect(first.outcome).toBe("applied");
     expect(second.outcome).toBe("duplicate");
-    expect(taskTokens.successes).toEqual([{ taskToken: TOKEN, output: "{}" }]);
+    expect(taskTokens.successes).toEqual([{ taskToken: TOKEN, output: JSON.stringify({ decision: "approve" }) }]);
     expect(await listComments(db.pool, workItem.id)).toHaveLength(1);
     expect(replies()).toHaveLength(1);
     expect(replies()[0]).toContain("design");
@@ -264,7 +264,7 @@ describe("handleCommand: commands on one work item, one at a time", () => {
     // Two handlers, each on its own connection from the pool, started together.
     const outcomes: CommandOutcome[] = await Promise.all([handleCommand(context(), ISSUE, one), handleCommand(context(), ISSUE, two)]);
 
-    expect(taskTokens.successes).toEqual([{ taskToken: TOKEN, output: "{}" }]);
+    expect(taskTokens.successes).toEqual([{ taskToken: TOKEN, output: JSON.stringify({ decision: "approve" }) }]);
     expect(outcomes.map((outcome) => outcome.outcome).sort()).toEqual(["applied", "refused"]);
     const rows = await listComments(db.pool, workItem.id);
     expect(rows.map((row) => row.outcome).sort()).toEqual(["applied", "refused"]);

@@ -56,17 +56,17 @@ No network or IAM change.
 
 - [x] 2.1 Failing tests against the local Postgres for migration 0006 and its queries. Scenario: Closed approval records its outcome. Also: approvals closed before the migration read `approved`; a closed approval without an outcome is refused.
 - [x] 2.2 Write `factory/ledger/migrations/0006_approval_feedback.sql` and the queries.
-- [ ] 2.3 Amend ADR 0015 (`/revise`, `/question`, the limits and the budget check).
+- [x] 2.3 Amend ADR 0015 (`/revise`, `/question`, the limits and the budget check).
 
 ## Step 3: State machine and Lambdas
 
 The webhook does not change.
 
-- [ ] 3.1 Failing tests for `definition()` with the ASL simulator. Scenarios:
+- [x] 3.1 Failing tests for `definition()` with the ASL simulator. Scenarios:
   - Approval decision routes the execution
   - Revised proposal routes on its new complexity (with the handler's route)
   - Large design waits for the owner (its text changed)
-- [ ] 3.2 Write the two Choices in `state-machine.ts`, and `{ "decision": "approve" }` in the `/approve` branch. Amend ADR 0002.
+- [x] 3.2 Write the two Choices in `state-machine.ts`, and `{ "decision": "approve" }` in the `/approve` branch. Amend ADR 0002.
 
 ## Step 4: Deploy and cloud check
 

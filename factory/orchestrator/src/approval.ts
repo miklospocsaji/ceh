@@ -122,8 +122,11 @@ export interface ApproveContext extends HandlerContext {
   taskTokens: TaskTokens;
 }
 
-/** The output the AwaitApproval task gets; the state machine drops it. */
-const APPROVAL_OUTPUT = "{}";
+/**
+ * The output an approved approval's task gets: the decision `approve`, on which the Choice after
+ * AwaitApproval (AwaitDesignApproval) goes on (add-approval-feedback design, "State machine").
+ */
+export const APPROVAL_OUTPUT = JSON.stringify({ decision: "approve" });
 
 /**
  * The effect of the owner's `/approve` in the cloud, for the command handler: closes the open

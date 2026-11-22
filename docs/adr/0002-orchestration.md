@@ -1,6 +1,6 @@
 # 0002 Orchestration
 
-Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop) and 2026-11-20 (owner commands)
+Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop), 2026-11-20 (owner commands) and 2026-11-20 (the owner's decision at an approval)
 
 ## Context
 
@@ -56,3 +56,12 @@ M3.5 (add-owner-commands, ADR 0015) replaces the `approve` worker task:
 - **`/approve` resumes the execution from the `command` task,** with the open approval's token, as `approve` did: the approval is closed, `SendTaskSuccess` is called, and the approval is reopened if that fails. The task decides under a lock on the work item's ledger row, so two approvals at once send the token once.
 - **The state machine does not change.** An execution paused in AwaitApproval or AwaitDesignApproval names no `approve` task, so one paused across the deploy is approved through `command` afterwards.
 - The later M3.5 changes add `/revise` (a decision through the same token) and `/abort` and `/resume` (stopping and starting executions from the `command` task).
+
+## Amendment 2026-11-20: the owner's decision at an approval
+
+M3.5 (add-approval-feedback, ADR 0015 amendment of 2026-11-20) lets the owner send a proposal or a `large` design back to its author:
+- **A Choice after each approval wait.** AwaitApproval resumes with `{ "decision": "approve" }` or `{ "decision": "revise" }` from the `command` task, and keeps only `{ decision }` as its output. ApprovalDecision then routes `revise` back to Proposal and anything else to Approved; DesignApprovalDecision routes `revise` back to Design and anything else to Plan. Going back resets `tries`, so the revised state starts with its crash retries unused.
+- **The history carries the decision only.** The output is computed as one of the two fixed words, whatever else a resumed task's output holds, so the owner's comment never enters the execution; it is in the ledger.
+- **A revision loops in the same execution.** Proposal (Design) runs again, then a new approval wait with a new token. Approved routes on the change's `x-complexity` as the revised proposal has it.
+- **Questions are answered outside the state machine.** `/question` runs its read-only session in the `command` task and leaves the paused execution and its token untouched. It gets no Step Functions retry; a crashed answer is a failed attempt, and the owner asks again.
+- Step Functions keeps an execution on the definition it started with, so an execution paused at an approval across the deploy has no Choice: a `/revise` to it would go on to Approved, which refuses a work item in `proposal`. Deploy with no execution paused at an approval, or approve those first.
