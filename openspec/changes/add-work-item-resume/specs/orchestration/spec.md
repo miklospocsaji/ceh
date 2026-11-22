@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: `/abort` stops a running work item
-An owner's `/abort` while the work item is between `intake` and `build` SHALL stop its execution, close its open attempts with the outcome `aborted` and its open approval with the outcome `aborted`, record the state it was in as `stopped_in`, and make it `aborted`. If the execution had already ended, the work item SHALL become `aborted` the same way. The reply SHALL say how to resume.
+An owner's `/abort` while the work item is between `intake` and `build` SHALL stop its execution and the ECS task it runs, close its open attempts with the outcome `aborted` and its open approval with the outcome `aborted`, record the state it was in as `stopped_in`, and make it `aborted`. If the execution had already ended, the work item SHALL become `aborted` the same way. The reply SHALL say how to resume.
 
 #### Scenario: Abort during the build stops the execution
 - **WHEN** the owner comments `/abort` while task 1.2 is being built
@@ -11,16 +11,20 @@ An owner's `/abort` while the work item is between `intake` and `build` SHALL st
 - **WHEN** the owner comments `/abort` while the proposal awaits approval
 - **THEN** the execution is stopped, the approval is closed with the outcome `aborted`, and the work item is `aborted` with `stopped_in` = `awaiting-proposal-approval`
 
+#### Scenario: Abort during Plan stops its task
+- **WHEN** the owner comments `/abort` while Plan's planner session runs
+- **THEN** the execution is stopped, Plan's ECS task is stopped, the planner attempt is closed `aborted`, and the work item is `aborted` with `stopped_in` = `plan`
+
 #### Scenario: Abort with nothing running is answered
 - **WHEN** the owner comments `/abort` on an issue whose work item is `aborted`, `escalated` or `pr-open`, or that has no work item
 - **THEN** nothing changes, and the issue gets one reply saying nothing runs
 
-### Requirement: Stopping an execution stops its running task
-Stopping a work item's execution SHALL stop the worker or build task it is running, and a task that writes after the stop SHALL NOT change the work item's state: every state update SHALL apply only from the state its writer expects.
+### Requirement: Aborting stops the running task
+Aborting a work item SHALL stop the worker or build task its execution is running. Step Functions stops a `.sync` task with the execution. It does not stop a `waitForTaskToken` task (Plan, Adopt), so the abort SHALL stop the execution's latest submitted ECS task itself, when no later event of the execution closed it. A task that writes after the stop SHALL NOT change the work item's state: every state update SHALL apply only from the state its writer expects.
 
 #### Scenario: Stopped execution stops its running task
-- **WHEN** an execution is stopped while its Build state runs a build task, and again while a worker state runs
-- **THEN** the build task and the worker task each stop within two minutes
+- **WHEN** an execution is aborted while its Build state runs a build task, again while a worker state runs, and again while Plan runs
+- **THEN** the build task, the worker task and Plan's task each stop within two minutes
 
 #### Scenario: Late write after abort is refused
 - **WHEN** a Proposal worker that was stopped finishes its attempt after the work item became `aborted`
@@ -116,11 +120,11 @@ For an `aborted` or `escalated` work item, `/approve`, `/revise` and `/question`
 - **THEN** nothing changes, and the reply names `pnpm factory run`
 
 ### Requirement: The worker controls only its own executions
-The worker's task role SHALL be allowed `states:StopExecution` and `states:DescribeExecution` only on its state machine's executions, and `states:StartExecution` only on its state machine.
+The worker's task role SHALL be allowed `states:StopExecution`, `states:DescribeExecution` and `states:GetExecutionHistory` only on its state machine's executions, `states:StartExecution` only on its state machine, and `ecs:StopTask` only on the tasks of the factory's cluster.
 
 #### Scenario: Worker may control only its own executions
 - **WHEN** the factory stack is synthesised
-- **THEN** the worker's task role allows `states:StartExecution` on the work-item state machine only, and `states:StopExecution` and `states:DescribeExecution` on that state machine's executions only
+- **THEN** the worker's task role allows `states:StartExecution` on the work-item state machine only, `states:StopExecution`, `states:DescribeExecution` and `states:GetExecutionHistory` on that state machine's executions only, and `ecs:StopTask` on the factory cluster's tasks only
 
 ### Requirement: A command that fails before its handler is answered
 A `command` task that fails before its handler runs, for example while it sets up the GitHub App, SHALL still try to post the fixed reply that the command did not go through and can be sent again. If GitHub cannot be reached for that reply either, the task SHALL log one line naming the issue, the comment id and that the command was neither recorded nor answered, and SHALL exit 1. The owner then sends the command again.

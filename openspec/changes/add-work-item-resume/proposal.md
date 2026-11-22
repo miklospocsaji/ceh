@@ -6,7 +6,7 @@ A work item whose execution was stopped or failed cannot be resumed. Relabelling
 
 ## What Changes
 
-- **`/abort [reason]` while the work item's execution runs** (sections 3 and 9): the `command` task stops the execution (`StopExecution`, which also stops its running ECS task), and the work item becomes `aborted`, with the state it was in recorded as `stopped_in`. Its open attempt is closed with the new outcome `aborted`, and its open approval with the outcome `aborted`. Aborted means paused, not final.
+- **`/abort [reason]` while the work item's execution runs** (sections 3 and 9): the `command` task stops the execution. `StopExecution` also stops a running `.sync` ECS task, but not a `waitForTaskToken` task such as Plan's (the stop spike, 2026-11-22), so the `command` task then stops the execution's running ECS task itself (`ecs:StopTask`). The work item the work item becomes `aborted`, with the state it was in recorded as `stopped_in`. Its open attempt is closed with the new outcome `aborted`, and its open approval with the outcome `aborted`. Aborted means paused, not final.
 - **`/resume [guidance]` when the work item's execution has ended** (`aborted`, `escalated`, or failed or stopped outside the factory), the issue is open and the pull request is not open yet (section 7):
   - The `command` task checks the execution has ended (`DescribeExecution`) and starts a new one, named `issue-<n>-resume-<comment id>`, with input `{ issueNumber, resume: true }`.
   - Intake adopts the work item: it stores the new execution's ARN and answers which state to enter. A Choice at the start of the state machine routes there.
@@ -18,7 +18,7 @@ A work item whose execution was stopped or failed cannot be resumed. Relabelling
 - **Relabelling** a work item's issue still ends in a `duplicate` Intake, which now comments that `/resume` continues the work item.
 - **Replies** on a stopped work item point to `/resume`, and `/revise` during the build points to `/abort` (section 6).
 - **Ledger** (migration `0007_resume.sql`): `work_items.state` gains `aborted` and the new column `stopped_in`, set on abort and on escalation; `attempts.outcome` and the approvals' outcome gain `aborted`. A work item's state changes only from the state the writer expects, so a stopped worker finishing late cannot move an aborted work item.
-- **IAM:** the worker may `states:StopExecution`, `states:DescribeExecution` and `states:StartExecution` on its own state machine and its executions only.
+- **IAM:** the worker may `states:StopExecution`, `states:DescribeExecution`, `states:GetExecutionHistory` and `states:StartExecution` on its own state machine and its executions only, and `ecs:StopTask` on the factory cluster's tasks only.
 - **GitHub App requests survive a network blip** (found in `add-approval-feedback`'s cloud check, 2026-11-22, where a `/question`'s `command` task lost its first network call and the owner got no reply; moved here by the owner):
   - The installation token request and the bot user's lookup are tried up to 3 times, with a backoff, on a network error or a 5xx answer. Every worker task makes both at startup, and the `command` task has no Step Functions retry to fall back on.
   - A network error names its code (such as `UND_ERR_CONNECT_TIMEOUT`), and nothing else from the underlying error, so the next one can be diagnosed from the log without risking the JWT.

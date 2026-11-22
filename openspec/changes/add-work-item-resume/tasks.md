@@ -6,7 +6,7 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
 
 ## Step 0: Before building
 
-- [ ] 0.1 Spike, confirmed with the owner first and with no production code, as in `design.md` ("Step 0"): stop an execution while a `.sync` worker task runs, and while a build task runs. Record the stop times, stop codes and signals in `design.md`, then delete the throwaway state machine. If a task does not stop, stop here and settle the fallback with the owner. Scenario: Stopped execution stops its running task (recorded by hand here; proved again in task 4.4).
+- [x] 0.1 Spike, confirmed with the owner first and with no production code, as in `design.md` ("Step 0"): stop an execution while a `.sync` worker task runs, and while a build task runs. Record the stop times, stop codes and signals in `design.md`, then delete the throwaway state machine. If a task does not stop, stop here and settle the fallback with the owner. Scenario: Stopped execution stops its running task (recorded by hand here; proved again in task 4.4).
 
 ## Step 1: Worker and GitHub App Forge
 
@@ -29,8 +29,9 @@ Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App request
 
 ### Handlers
 
-- [ ] 1.4 Failing command-handler tests with a fake Step Functions client (stop, describe, start). Scenarios:
+- [ ] 1.4 Failing command-handler tests with a fake Step Functions client (stop, describe, history, start) and a fake ECS client (stop task). Scenarios:
   - Abort during the build stops the execution (handler half)
+  - Abort during Plan stops its task
   - Abort while awaiting approval closes the approval
   - Abort with nothing running is answered
   - Resume starts a new execution (handler half)
@@ -42,7 +43,7 @@ Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App request
   - Revise during the build points to abort
   - Local work item points to the run command
 
-  Also: a `--closed` task on a work item that is not running does nothing.
+  Also: a `--closed` task on a work item that is not running does nothing; the abort stops no task when the latest submitted task was closed in the history, or when the execution had already ended; a failed `StopTask` is logged and the abort goes on.
 - [ ] 1.5 Write the `/abort`, `/resume` and `--closed` branches, replacing their interim replies, and `command --closed` in the worker.
 - [ ] 1.6 Failing tests for Adopt (`intake --resume`) and the entry states. Scenarios:
   - Resume at an approval asks again
@@ -66,7 +67,7 @@ No network change.
 
 - [ ] 2.1 Failing tests against the local Postgres for migration 0007 and the compare-and-set update. Scenario: Late write after abort is refused. Also: an `aborted` attempt has no failure reason; an approval closes `aborted`; existing rows are unchanged.
 - [ ] 2.2 Write `factory/ledger/migrations/0007_resume.sql` and `setWorkItemState(…, { from })`; pass the expected state from every handler.
-- [ ] 2.3 Failing CDK assertion tests, then the stack: the worker's three Step Functions actions and `FACTORY_STATE_MACHINE_ARN`. Scenario: Worker may control only its own executions.
+- [ ] 2.3 Failing CDK assertion tests, then the stack: the worker's four Step Functions actions, `ecs:StopTask` on the cluster's tasks and `FACTORY_STATE_MACHINE_ARN`. Scenario: Worker may control only its own executions.
 - [ ] 2.4 Write ADR 0016 (resuming work items), with the spike's result, and amend ADR 0003 (the M3.5 ledger) and ADR 0015 (`/abort`, `/resume`, the closed issue).
 
 ## Step 3: State machine and Lambdas
@@ -88,7 +89,7 @@ No network change.
   - Resume starts a new execution
   - Closing the issue stops the work item
   - Reopened issue can be resumed
-- [ ] 4.4 Cloud test from the spike, against the deployed stack. Scenario: Stopped execution stops its running task.
+- [ ] 4.4 Cloud test from the spike, against the deployed stack, confirmed with the owner first. A throwaway state machine on the stack's boundary-check task definitions runs a `.sync` worker task, a `.sync` build task in a Map, and a `waitForTaskToken` worker task as Plan runs. Each execution is stopped by the abort's own stop code (`StopExecution`, then `StopTask` from the history), and the test deletes the state machine and its role afterwards. Scenario: Stopped execution stops its running task.
 - [ ] 4.5 Exit run (`docs/m3.5-owner-commands.md`, section 11). The owner files a fresh `vocab` issue whose proposal will ask an open question, and labels it `factory`. Confirm, in order:
   1. A `/question` about the proposal is answered with the approval still open; a `/revise` answering the open question gives a revised proposal that reflects the answer and no longer lists it.
   2. A `/revise` sent while the proposal is being rewritten gets the busy reply and changes nothing.

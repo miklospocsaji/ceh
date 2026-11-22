@@ -16,7 +16,8 @@ Start ─▶ StartChoice ─┬─ resume = false ─▶ Intake ─▶ … (as t
                                                                 ├─ plan              ─▶ Plan
                                                                 └─ build             ─▶ BuildTasks
 
-/abort:  command task ─▶ lock ─▶ StopExecution ─▶ close attempts and approval `aborted`
+/abort:  command task ─▶ lock ─▶ StopExecution ─▶ StopTask (a token task still running)
+                       ─▶ close attempts and approval `aborted`
                        ─▶ state `aborted`, stopped_in ─▶ unlock ─▶ reply
 /resume: command task ─▶ lock ─▶ checks (DescribeExecution ended, issue open, no PR)
                        ─▶ StartExecution issue-<n>-resume-<comment id> ─▶ unlock ─▶ reply
@@ -29,14 +30,29 @@ issues.closed ─▶ webhook ─▶ command --issue <n> --closed ─▶ as /abor
 
 Before any code, and with no production code: on a throwaway state machine with the AWS CLI, run the worker task definition with a `sleep` command override in one `ecs:runTask.sync` state and the build task definition in another, and stop each execution while the task runs. Record in this file how long the ECS task takes to stop, its stop code and reason, and whether the container gets SIGTERM before SIGKILL. Then delete the state machine. If the task does not stop, stop and settle the fallback with the owner (the `command` task calling `ecs:StopTask` on the execution's running task is the likely one).
 
+#### Spike result (task 0.1, 2026-11-22)
+
+The owner approved the spike, plus a third case that design did not ask for: a `waitForTaskToken` worker task, since Plan and Adopt are token tasks. A throwaway role and state machine `ceh-spike-stop` ran the stack's two boundary-check task definitions. These have the worker's and the build task's images, roles, security groups and subnets, but an entry point ECS lets a command override. The build case ran inside an inline Map, as BuildTasks does. Each task ran `node -e` as PID 1, as the real entry points do. The script logged a heartbeat every 5 s, logged SIGTERM without exiting, and would have exited on its own after 10 min. Each execution was stopped 60 s after its task was `RUNNING`. Both resources were deleted afterwards, and no task was left running.
+
+| Case | `StopExecution` (UTC) | SIGTERM logged | ECS `stoppingAt` | `executionStoppedAt`, exit 137 | Task `STOPPED` | Stop code and reason |
+| --- | --- | --- | --- | --- | --- | --- |
+| `.sync` worker task | 18:25:43.5 | +1.8 s | +0.9 s | +42.9 s | +66.7 s | `UserInitiated`, "The Task state in AWS Step Functions execution [<arn>] which was managing this resource was aborted" |
+| `.sync` build task in a Map | 18:25:32.7 | +2.5 s | +1.0 s | +43.6 s | +67.9 s | the same |
+| `waitForTaskToken` worker task | 18:25:38.7 | none | none | — | still `RUNNING` after 180 s, so stopped by hand with `ecs stop-task` | (manual) `UserInitiated`, "spike: manual stop": SIGTERM +1.0 s, `stoppingAt` +0.5 s, `executionStoppedAt` +42.1 s, exit 137, `STOPPED` +65.4 s after `stop-task` |
+
+- **`.sync` tasks stop:** Step Functions calls `StopTask` about 1 s after `StopExecution`. Both the worker and the build task were `STOPPED` in about 67 s, within the scenario's two minutes. The execution's status is `ABORTED` with the error passed to `StopExecution`.
+- **Signals:** the container gets SIGTERM within about 2 s, then SIGKILL (exit 137). The last heartbeat came 26 s after SIGTERM and the next one never did, so SIGKILL came 26 to 31 s after SIGTERM. That matches the default stop timeout of 30 s (the task definitions set no `stopTimeout` and no init process). The real entry points install no SIGTERM handler. Node as PID 1 with no handler ignores SIGTERM, so a real worker or build task runs on until SIGKILL, about 30 s after the stop, and can still write in that time. Compare-and-set state updates and attempts closed `aborted` are what guard against that, as designed.
+- **Token tasks do not stop:** stopping the execution leaves a `waitForTaskToken` ECS task running. Its later `SendTaskSuccess` fails, since the execution has ended. This matters for **Plan**, whose planner session runs inside its token task for minutes and spends model budget, and for Adopt, which is short. It does not matter for AwaitApproval and AwaitDesignApproval: their task stores the token, posts the summary and exits, so nothing runs while they wait. **Settled with the owner (2026-11-22): the fallback.** After `StopExecution`, the `command` task stops the execution's running ECS task itself (see "Command handler: `/abort` and `--closed`", step 3), and the spike's scenario covers Plan.
+
 ### Command handler: `/abort` and `--closed`
 
 Under the work-item lock:
 
 1. No work item, or `aborted`, `escalated`, `pr-open`: "nothing runs" (for `--closed`: no comment).
 2. `DescribeExecution` on the work item's execution ARN. If it is running, `StopExecution` with error `factory.Aborted` and a fixed cause naming the comment id (never the comment's text).
-3. Close open attempts `aborted`, an open approval `aborted`; `stopped_in` = the current state; state = `aborted` (compare-and-set from the state read under the lock).
-4. Record the comment `applied`; commit; reply. `--closed` has no comment row: it posts one fixed comment and records nothing in `comments`.
+3. If step 2 stopped the execution: `GetExecutionHistory` in reverse order, to the latest `TaskSubmitted` event. If no later `TaskSucceeded`, `TaskFailed` or `TaskTimedOut` event closed it, `ecs:StopTask` its `TaskArn`, with the cluster taken from that ARN and a fixed reason naming the comment id. This step stops a token task (Plan, Adopt), which `StopExecution` leaves running. For a `.sync` task it repeats Step Functions' own `StopTask`, which is harmless. Only one task runs at a time (the Map's `MaxConcurrency` is 1), so the latest submitted task is the running one. A failed `StopTask` is logged with its error code, and the abort goes on: the task's late writes are refused by compare-and-set.
+4. Close open attempts `aborted`, an open approval `aborted`; `stopped_in` = the current state; state = `aborted` (compare-and-set from the state read under the lock).
+5. Record the comment `applied`; commit; reply. `--closed` has no comment row: it posts one fixed comment and records nothing in `comments`.
 
 A work item with no execution ARN (a local run) gets the "use `pnpm factory run`" reply.
 
@@ -104,12 +120,13 @@ Found in `add-approval-feedback`'s cloud check (its `design.md`, "Cloud results"
 
 ### Stack
 
-The worker's task role gains `states:StartExecution` on the state machine's ARN, and `states:StopExecution` and `states:DescribeExecution` on `arn:aws:states:<region>:<account>:execution:<state machine name>:*`. The state machine's ARN is already a dependency of the worker's policy (SendTaskSuccess), so no cycle is added. The worker gets the state machine ARN in its environment (`FACTORY_STATE_MACHINE_ARN`).
+The worker's task role gains `states:StartExecution` on the state machine's ARN; `states:StopExecution`, `states:DescribeExecution` and `states:GetExecutionHistory` on `arn:aws:states:<region>:<account>:execution:<state machine name>:*`; and `ecs:StopTask` on `arn:aws:ecs:<region>:<account>:task/<cluster name>/*`. IAM cannot narrow `StopTask` to one execution's task, so the code stops only the task ARN it read from that execution's history. The state machine's ARN is already a dependency of the worker's policy (SendTaskSuccess), so no cycle is added. The worker gets the state machine ARN in its environment (`FACTORY_STATE_MACHINE_ARN`).
 
 ## Decisions
 
 - **Adopt is a token task.** BuildTasks needs `$changeId` and `$tasks`, which a `.sync` task cannot return, so Adopt answers like Plan does.
 - **`/abort` on an ended execution marks the work item `aborted`** (with `stopped_in`), rather than answering "nothing runs", so `/status` never shows a running state that nothing runs. Decided here; the owner is told.
+- **`/abort` stops a token task itself** (owner, 2026-11-22, after the stop spike): `StopExecution` leaves a `waitForTaskToken` ECS task running, so `/abort` stops the execution's latest unclosed task with `ecs:StopTask`. The worker may stop any task in the factory's cluster. The alternatives were rejected: Plan polling for the abort, which is more moving parts and covers only the states that check, and accepting the gap, which lets the planner commit after the abort.
 - **Compare-and-set on every state update**, so a stopped task that still writes cannot undo an abort. It also guards today's handlers against duplicate tasks.
 - **No comment row for a closed issue**: closing is not a command. Its comment is fixed text.
 - **Local work items** answer `/abort` and `/resume` with "use `pnpm factory run`": they have no execution to stop or start. Decided here; the owner is told.
