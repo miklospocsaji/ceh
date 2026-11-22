@@ -2,7 +2,7 @@
 
 M3.5, change 3 of 3 (`docs/m3.5-owner-commands.md`, section 10), built after `add-approval-feedback`. Built by a local Claude Code session in `ceh`; no factory role changes the factory. Unit tests run in `pnpm check` with `FakeForge`, fake SDK sessions, fake Step Functions clients and the real local ledger. Each task's tests are written first and fail for the right reason before its code; `pnpm check` is green after every task that writes code. Every deploy, AWS write and GitHub write is confirmed with the owner first.
 
-Scenarios carried unchanged inside MODIFIED requirements keep their existing tests and are not listed below: Labelling an issue starts an execution, Other labels are ignored. They must still pass, and the coverage run of task 4.6 checks them.
+Scenarios carried unchanged inside MODIFIED requirements keep their existing tests and are not listed below: Labelling an issue starts an execution, Other labels are ignored, Installation token is scoped to the repository, Expiring token is refreshed, Token failures do not leak the token, Commits are authored by the factory's bot. They must still pass, and the coverage run of task 4.6 checks them.
 
 ## Step 0: Before building
 
@@ -10,11 +10,26 @@ Scenarios carried unchanged inside MODIFIED requirements keep their existing tes
 
 ## Step 1: Worker and GitHub App Forge
 
-No Forge or GitHub App change: `issues.closed` is part of the Issues events the App already receives, and `getIssue` gives the issue's state.
+No GitHub App change: `issues.closed` is part of the Issues events the App already receives, and `getIssue` gives the issue's state.
+
+### GitHub App requests
+
+Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App requests").
+
+- [ ] 1.1 Failing tests for `createInstallationTokenProvider` and `appCommitter` with an injected `fetch` and sleep. Scenarios:
+  - Token request is retried after a network error
+  - Token request is not retried after a refusal
+  - Network failure names its code
+
+  Also: the bot lookup is retried the same way; a 5xx is retried; a cause whose `code` is not a plain code is left out; the four carried scenarios of "The factory acts as its GitHub App" still pass.
+- [ ] 1.2 Write the retries and the code in `factory/forge/src/github-app.ts`.
+- [ ] 1.3 Failing worker tests, then the code in `factory/worker/src/main.ts`. Scenarios:
+  - Command that fails before its handler is answered
+  - Command that cannot reach GitHub is logged
 
 ### Handlers
 
-- [ ] 1.1 Failing command-handler tests with a fake Step Functions client (stop, describe, start). Scenarios:
+- [ ] 1.4 Failing command-handler tests with a fake Step Functions client (stop, describe, start). Scenarios:
   - Abort during the build stops the execution (handler half)
   - Abort while awaiting approval closes the approval
   - Abort with nothing running is answered
@@ -28,22 +43,22 @@ No Forge or GitHub App change: `issues.closed` is part of the Issues events the 
   - Local work item points to the run command
 
   Also: a `--closed` task on a work item that is not running does nothing.
-- [ ] 1.2 Write the `/abort`, `/resume` and `--closed` branches, replacing their interim replies, and `command --closed` in the worker.
-- [ ] 1.3 Failing tests for Adopt (`intake --resume`) and the entry states. Scenarios:
+- [ ] 1.5 Write the `/abort`, `/resume` and `--closed` branches, replacing their interim replies, and `command --closed` in the worker.
+- [ ] 1.6 Failing tests for Adopt (`intake --resume`) and the entry states. Scenarios:
   - Resume at an approval asks again
   - Resume after approval asks for no second approval
   - Resume after an execution failed outside the factory (handler half: Adopt answers `plan`)
   - Resume during the build skips finished tasks (handler half: Adopt answers the unfinished tasks; Step skips the done ones)
 
   Also: Design for a work item in `design-review` runs only the reviewer; Adopt for a `pr-open` work item answers exit 4.
-- [ ] 1.4 Write Adopt in `intake.ts` and the entry checks in Design.
-- [ ] 1.5 Failing tests for retry counting and the duplicate comment. Scenarios:
+- [ ] 1.7 Write Adopt in `intake.ts` and the entry checks in Design.
+- [ ] 1.8 Failing tests for retry counting and the duplicate comment. Scenarios:
   - Aborted attempt does not count
   - Resumed escalation gets fresh retries
   - Escalation records where the work item stopped
   - Relabelling does not create a second work item (its text changed: the comment)
-- [ ] 1.6 Write the counting from the last resume, `stopped_in` on escalation, and the duplicate Intake's comment.
-- [ ] 1.7 Failing prompt and build-input tests, then the code. Scenario: Resume guidance reaches the next role.
+- [ ] 1.9 Write the counting from the last resume, `stopped_in` on escalation, and the duplicate Intake's comment.
+- [ ] 1.10 Failing prompt and build-input tests, then the code. Scenario: Resume guidance reaches the next role.
 
 ## Step 2: Network and data stack
 

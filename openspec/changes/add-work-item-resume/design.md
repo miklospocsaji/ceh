@@ -94,6 +94,14 @@ ALTER TABLE attempts ADD CONSTRAINT attempts_outcome_check CHECK (outcome IN ('s
 
 A relabel's Intake still answers `duplicate` (exit 4), and now comments once: "This issue already has the work item `<id>` (`<state>`). Reply `/resume` to continue it." A webhook redelivery starts no execution, so it posts nothing.
 
+### GitHub App requests (`factory/forge/src/github-app.ts`)
+
+Found in `add-approval-feedback`'s cloud check (its `design.md`, "Cloud results"): a `command` task's first network call, the installation token request, failed with `fetch failed` about 10 s after the container started, and the owner's `/question` was lost with no reply. The cause could not be found, because the error's `cause` is dropped.
+
+- **Retries.** `createInstallationTokenProvider`'s request and `appCommitter`'s lookup are tried up to 3 times, waiting 2 s and then 5 s, when `fetch` rejects or the status is 5xx. Any other answer (401, 403, 404, 422, or a 2xx without a token) is final at once. Both requests are safe to repeat: a second token or a second `GET /users/<bot>` changes nothing. Retries are not added to the Forge's other calls, since a comment or a push repeated after a connection reset could be done twice. A sleep is injected, so tests do not wait. Worst case, about 3 × 10 s of connect timeouts plus 7 s of waits, about 40 s, is well inside every state's timeout.
+- **The error's code.** A rejected `fetch` carries the reason in `cause.code` (for example `UND_ERR_CONNECT_TIMEOUT`, `ENOTFOUND`, `ECONNRESET`). The message takes that code only when it matches `^[A-Z][A-Z0-9_]*$`, and nothing else from the cause, so the scrubbing stays as it is. Example: `GitHub App: requesting an installation token failed 3 times: fetch failed (UND_ERR_CONNECT_TIMEOUT)`.
+- **A `command` task that fails during setup.** `main.ts` builds the Forge (`appCommitter`) before `runWorker`, so today a setup failure reaches only the top-level catch, and the `command` branch's fixed reply is never tried. For `command`, a setup failure now tries `commandFailedReply()` through a Forge without a committer (a comment needs no commit identity), whose token provider retries as above. If that fails too, the task logs `factory-worker: command for issue #<n>, comment <id>: GitHub could not be reached; the command was neither recorded nor answered` and exits 1. No retry layer is added around the `command` task itself: it is started by the webhook's RunTask, and GitHub does not redeliver a webhook that was answered 2xx. A GitHub outage longer than the retries therefore still loses the command, and the log says so.
+
 ### Stack
 
 The worker's task role gains `states:StartExecution` on the state machine's ARN, and `states:StopExecution` and `states:DescribeExecution` on `arn:aws:states:<region>:<account>:execution:<state machine name>:*`. The state machine's ARN is already a dependency of the worker's policy (SendTaskSuccess), so no cycle is added. The worker gets the state machine ARN in its environment (`FACTORY_STATE_MACHINE_ARN`).
@@ -105,6 +113,8 @@ The worker's task role gains `states:StartExecution` on the state machine's ARN,
 - **Compare-and-set on every state update**, so a stopped task that still writes cannot undo an abort. It also guards today's handlers against duplicate tasks.
 - **No comment row for a closed issue**: closing is not a command. Its comment is fixed text.
 - **Local work items** answer `/abort` and `/resume` with "use `pnpm factory run`": they have no execution to stop or start. Decided here; the owner is told.
+
+- **Retries only where repeating is harmless:** the token request and the bot lookup, not comments or pushes. Decided here after the cloud check of `add-approval-feedback`; the owner moved the work into this change.
 
 ## Risks
 

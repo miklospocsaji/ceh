@@ -122,6 +122,17 @@ The worker's task role SHALL be allowed `states:StopExecution` and `states:Descr
 - **WHEN** the factory stack is synthesised
 - **THEN** the worker's task role allows `states:StartExecution` on the work-item state machine only, and `states:StopExecution` and `states:DescribeExecution` on that state machine's executions only
 
+### Requirement: A command that fails before its handler is answered
+A `command` task that fails before its handler runs, for example while it sets up the GitHub App, SHALL still try to post the fixed reply that the command did not go through and can be sent again. If GitHub cannot be reached for that reply either, the task SHALL log one line naming the issue, the comment id and that the command was neither recorded nor answered, and SHALL exit 1. The owner then sends the command again.
+
+#### Scenario: Command that fails before its handler is answered
+- **WHEN** the `command` task for an owner's `/status` cannot look up the App's bot user, and GitHub answers again later
+- **THEN** nothing is recorded, the issue gets one comment saying the `/status` did not go through and can be sent again, and the task exits 1
+
+#### Scenario: Command that cannot reach GitHub is logged
+- **WHEN** every request of the `command` task to GitHub fails with a network error
+- **THEN** nothing is recorded, no comment is posted, the log names the issue, the comment id and that the command was neither recorded nor answered, and the task exits 1
+
 ## MODIFIED Requirements
 
 ### Requirement: Labelling an issue starts a work item
@@ -138,3 +149,34 @@ When the label `factory` is added to an open issue, the factory SHALL start a St
 #### Scenario: Other labels are ignored
 - **WHEN** a label other than `factory` is added to an issue
 - **THEN** no execution starts and no work item is created
+
+### Requirement: The factory acts as its GitHub App
+Outside local runs, the Forge SHALL authenticate with the factory's GitHub App installation tokens, requested for the target's repository only with `contents: write`, `issues: write`, `pull_requests: write` and `metadata: read`, and refreshed before any call within five minutes of expiry. Tokens SHALL never appear in error messages, logs, command lines, remote URLs or git config. Commits the factory pushes SHALL be authored and committed by the App's bot user. The installation token request and the bot user's lookup SHALL each be tried up to 3 times, with a backoff, when the request fails with a network error or GitHub answers with a 5xx status, and SHALL not be tried again after any other answer. A network error SHALL be reported with its error code, such as `UND_ERR_CONNECT_TIMEOUT`, when it has one, and with nothing else from the underlying error.
+
+#### Scenario: Installation token is scoped to the repository
+- **WHEN** the token provider requests an installation token
+- **THEN** the request is signed with a JWT for the App, names only the target's repository, and asks only for `contents: write`, `issues: write`, `pull_requests: write` and `metadata: read`
+
+#### Scenario: Expiring token is refreshed
+- **WHEN** the Forge makes a call less than five minutes before its current token expires
+- **THEN** a new installation token is requested first, and the call uses the new token
+
+#### Scenario: Token failures do not leak the token
+- **WHEN** a GitHub call or a push fails with an authentication error
+- **THEN** the error message and every log line name the failure without containing the token or the App's private key
+
+#### Scenario: Commits are authored by the factory's bot
+- **WHEN** the worker commits and pushes a proposal or a task
+- **THEN** the pushed commit's author and committer are the App's bot user, not the owner
+
+#### Scenario: Token request is retried after a network error
+- **WHEN** the first installation token request fails with a network error and the second gets a token
+- **THEN** the provider returns that token, after two requests and one backoff wait
+
+#### Scenario: Token request is not retried after a refusal
+- **WHEN** GitHub answers the installation token request with 401
+- **THEN** the provider rejects with `unauthorized` after one request
+
+#### Scenario: Network failure names its code
+- **WHEN** all 3 installation token requests fail with a connect timeout
+- **THEN** the error message says the request failed 3 times and names `UND_ERR_CONNECT_TIMEOUT`, and contains neither the JWT nor the App's private key

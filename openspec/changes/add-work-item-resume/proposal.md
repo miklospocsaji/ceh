@@ -19,6 +19,10 @@ A work item whose execution was stopped or failed cannot be resumed. Relabelling
 - **Replies** on a stopped work item point to `/resume`, and `/revise` during the build points to `/abort` (section 6).
 - **Ledger** (migration `0007_resume.sql`): `work_items.state` gains `aborted` and the new column `stopped_in`, set on abort and on escalation; `attempts.outcome` and the approvals' outcome gain `aborted`. A work item's state changes only from the state the writer expects, so a stopped worker finishing late cannot move an aborted work item.
 - **IAM:** the worker may `states:StopExecution`, `states:DescribeExecution` and `states:StartExecution` on its own state machine and its executions only.
+- **GitHub App requests survive a network blip** (found in `add-approval-feedback`'s cloud check, 2026-11-22, where a `/question`'s `command` task lost its first network call and the owner got no reply; moved here by the owner):
+  - The installation token request and the bot user's lookup are tried up to 3 times, with a backoff, on a network error or a 5xx answer. Every worker task makes both at startup, and the `command` task has no Step Functions retry to fall back on.
+  - A network error names its code (such as `UND_ERR_CONNECT_TIMEOUT`), and nothing else from the underlying error, so the next one can be diagnosed from the log without risking the JWT.
+  - A `command` task that fails before its handler still tries the fixed "did not go through" reply. If GitHub cannot be reached at all, the log line names the issue and the comment, and the owner sends the command again.
 - **Spike first:** confirm that stopping an execution stops the running `.sync` ECS task, for the worker and the build task.
 
 Out of scope:
@@ -33,7 +37,7 @@ Out of scope:
 ### New Capabilities
 
 ### Modified Capabilities
-- `orchestration`: `/abort`, `/resume` and the closed issue; `aborted` and `stopped_in`; the start Choice and Intake adopting a work item; every entry state accepting its own state; aborted attempts and fresh retries; the duplicate Intake's comment; the worker's new Step Functions permissions.
+- `orchestration`: `/abort`, `/resume` and the closed issue; retried GitHub App requests and the reply for a command that fails before its handler; `aborted` and `stopped_in`; the start Choice and Intake adopting a work item; every entry state accepting its own state; aborted attempts and fresh retries; the duplicate Intake's comment; the worker's new Step Functions permissions.
 - `roles`: the `/resume` guidance in the next role's prompt.
 
 ## Impact
@@ -42,7 +46,8 @@ Out of scope:
 - `factory/roles`: the owner's guidance in the prompt, for worker and build roles.
 - `factory/artifacts`: the owner's guidance in the build input.
 - `factory/ledger`: migration `0007_resume.sql`, compare-and-set state updates.
-- `factory/worker`: `command --closed`, a Step Functions client for stop, describe and start.
+- `factory/forge`: retries and the error code in `createInstallationTokenProvider` and `appCommitter`.
+- `factory/worker`: `command --closed`, a Step Functions client for stop, describe and start; the failure reply for a `command` task that fails during setup.
 - `infra`: the worker's task role gains the three Step Functions actions, scoped to its state machine.
 - Docs: ADR 0016 (resuming work items), amendments to ADR 0015, ADR 0002 and ADR 0003, the brief (M3.5 ticked), `CLAUDE.md`.
 - Tagged `large`: two capabilities, a ledger migration, a state machine change, and new IAM.
