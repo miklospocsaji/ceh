@@ -20,7 +20,9 @@
  * the design.
  *
  * Its state is re-derived from the ledger, so a retried task goes on where the last one ended:
- * `design` runs the architect, `design-review` the reviewer on the pushed design.
+ * `design` runs the architect, `design-review` the reviewer on the pushed design. So does a resumed
+ * execution (add-work-item-resume): attempts closed `aborted` do not count, a resumed escalation
+ * counts from the `/resume`, and the first role to run gets the `/resume` text.
  */
 import { join } from "node:path";
 import { ReviewResult } from "@ceh/factory-artifacts";
@@ -34,6 +36,7 @@ import { renderEvidence, renderFindings } from "./evidence.ts";
 import { NO_WHAT_CHANGED, revisionRun, saysWhatChanged, stageFeedback, type AttemptFailure } from "./feedback.ts";
 import { commitPaths, ensureWorktree, hasChangesUnder, resetToRemoteHead, type GitIdentity } from "./git.ts";
 import type { HandlerContext, Route, Transition, WorkItemState } from "./handler.ts";
+import { counts, resumeGuidance, retriesSince } from "./resume.ts";
 
 /** Architect attempts per Design, in total, before the work item escalates. */
 export const MAX_DESIGN_ATTEMPTS = 3;
@@ -86,9 +89,17 @@ export async function design(ctx: DesignContext, item: WorkItemRow): Promise<Tra
   const since = flaw === undefined ? 0n : BigInt(flaw.attempt.id);
   const ofDesign = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === DESIGN || attempt.state === REVIEW);
   for (const attempt of ofDesign.filter(isOpen)) await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "error" });
-  const previous = ofDesign.filter((attempt) => BigInt(attempt.id) > since && (revisedAt === undefined || attempt.startedAt > revisedAt));
+  const resetAt = await retriesSince(db, item.id);
+  const previous = ofDesign.filter((attempt) => BigInt(attempt.id) > since && counts(attempt, resetAt) && (revisedAt === undefined || attempt.startedAt > revisedAt));
+  let guidance = await resumeGuidance(db, item.id);
+  /** The `/resume` text for the first attempt only, and the comment ids that attempt names. */
+  const takeGuidance = (commentIds: readonly string[] = []): { input: Partial<WorkItem>; commentIds: string[] } => {
+    const taken = guidance;
+    guidance = undefined;
+    return taken === undefined ? { input: {}, commentIds: [...commentIds] } : { input: { ownerGuidance: { text: taken.text } }, commentIds: [...commentIds, taken.commentId] };
+  };
 
-  let workItem = item.state === "proposal-approved" ? await setWorkItemState(db, item.id, DESIGN) : item;
+  let workItem = item.state === "proposal-approved" ? await setWorkItemState(db, item.id, DESIGN, { from: item.state }) : item;
   let architectAttempts = previous.filter((attempt) => attempt.state === DESIGN).length;
   let reviewFailures = 0;
   // A revision answers the owner, not the flaw the design was already revised for.
@@ -110,9 +121,10 @@ export async function design(ctx: DesignContext, item: WorkItemRow): Promise<Tra
     if (needsDesign) {
       if (architectAttempts >= MAX_DESIGN_ATTEMPTS) return escalate(ctx, workItem, architectAttempts, evidence);
       architectAttempts += 1;
-      const attempt = await openAttempt(db, { workItemId: item.id, state: DESIGN, role: ctx.architect.name, ...(revision ? { commentIds: stage.commentIds } : {}) });
+      const guided = takeGuidance(revision ? stage.commentIds : []);
+      const attempt = await openAttempt(db, { workItemId: item.id, state: DESIGN, role: ctx.architect.name, commentIds: guided.commentIds });
       const check = revision ? (result: unknown) => (saysWhatChanged(result) ? undefined : NO_WHAT_CHANGED) : undefined;
-      const outcome = await runAttempt(ctx, attempt, ctx.architect, await roleInput(true), evidence, check);
+      const outcome = await runAttempt(ctx, attempt, ctx.architect, { ...(await roleInput(true)), ...guided.input }, evidence, check);
       if (!outcome.ok) {
         evidence = { reason: outcome.failure.reason, evidence: outcome.failure.evidence };
         if (outcome.failure.reason === "auth-mode-mismatch") return escalate(ctx, workItem, architectAttempts, evidence);
@@ -132,14 +144,15 @@ export async function design(ctx: DesignContext, item: WorkItemRow): Promise<Tra
       });
       await ctx.forge.pushBranch({ worktree, branch: item.branch });
       if (complexity === "large") {
-        return { kind: "advance", workItem: await setWorkItemState(db, item.id, AWAITING_DESIGN), result: outcome.result, route: "owner-review" };
+        return { kind: "advance", workItem: await setWorkItemState(db, item.id, AWAITING_DESIGN, { from: DESIGN }), result: outcome.result, route: "owner-review" };
       }
-      workItem = await setWorkItemState(db, item.id, REVIEW);
+      workItem = await setWorkItemState(db, item.id, REVIEW, { from: DESIGN });
     }
 
     // The reviewer starts from the artifacts only, with no evidence: a fresh session every time.
-    const attempt = await openAttempt(db, { workItemId: item.id, state: REVIEW, role: ctx.designReviewer.name });
-    const outcome = await runAttempt(ctx, attempt, ctx.designReviewer, await roleInput(), undefined);
+    const guided = takeGuidance();
+    const attempt = await openAttempt(db, { workItemId: item.id, state: REVIEW, role: ctx.designReviewer.name, commentIds: guided.commentIds });
+    const outcome = await runAttempt(ctx, attempt, ctx.designReviewer, { ...(await roleInput()), ...guided.input }, undefined);
     if (!outcome.ok) {
       reviewFailures += 1;
       if (outcome.failure.reason === "auth-mode-mismatch" || reviewFailures >= MAX_REVIEW_FAILURES) {
@@ -150,10 +163,10 @@ export async function design(ctx: DesignContext, item: WorkItemRow): Promise<Tra
     }
     const review = ReviewResult.parse(outcome.result);
     if (review.verdict === "approve") {
-      return { kind: "advance", workItem: await setWorkItemState(db, item.id, PLAN), result: outcome.result, route: "plan" };
+      return { kind: "advance", workItem: await setWorkItemState(db, item.id, PLAN, { from: REVIEW }), result: outcome.result, route: "plan" };
     }
     evidence = { reason: "changes-requested", evidence: renderFindings(review.findings) };
-    workItem = await setWorkItemState(db, item.id, DESIGN);
+    workItem = await setWorkItemState(db, item.id, DESIGN, { from: REVIEW });
     needsDesign = true;
   }
 }

@@ -22,12 +22,18 @@
  * - The states after Proposal (add-build-loop): `design`, `plan` (a waitForTaskToken task that
  *   resumes the execution with the change id and the unfinished task ids), `step --task <id>`,
  *   which prepares the task's next build in the artifact store, and `open-pr`. Each clones afresh.
+ * - Resuming (add-work-item-resume): `command` applies `/abort` and `/resume` with the Step
+ *   Functions and ECS clients, and `command --closed` stops a running work item whose issue was
+ *   closed (exit 0 either way; a failed StopTask is logged). `intake --resume --execution <arn>` is
+ *   Adopt, a waitForTaskToken task that resumes the execution with `{ exitCode, entry, changeId,
+ *   tasks }`: exit 0 and the entry state, or exit 4 with nothing to resume.
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ForgeError, type Forge } from "@ceh/factory-forge";
 import { findWorkItemByIssue, migrate, waitForLedger, type WorkItemRow } from "@ceh/factory-ledger";
 import {
+  adopt,
   approve,
   approved,
   awaitApproval,
@@ -36,6 +42,7 @@ import {
   CommandFailed,
   commandFailedReply,
   handleCommand,
+  handleIssueClosed,
   InvalidCommand,
   design,
   ensureWorktree,
@@ -48,6 +55,8 @@ import {
   step,
   WORKER_EXIT,
   type ArtifactStore,
+  type EcsTasks,
+  type Executions,
   type GitIdentity,
   type StepContext,
   type StepResult,
@@ -65,6 +74,8 @@ export { WORKER_EXIT } from "@ceh/factory-orchestrator";
 export const AWAIT_APPROVAL_FAILURE = { error: "factory.AwaitApprovalFailed", cause: "The await-approval worker task failed; see its log." } as const;
 /** What Plan reports with SendTaskFailure: fixed text, never an error's message. */
 export const PLAN_FAILURE = { error: "factory.PlanFailed", cause: "The plan worker task failed; see its log." } as const;
+/** What Adopt reports with SendTaskFailure: fixed text, never an error's message. */
+export const ADOPT_FAILURE = { error: "factory.AdoptFailed", cause: "The intake --resume worker task failed; see its log." } as const;
 
 /** The states the state machine runs as waitForTaskToken tasks, and what they report on failure. */
 const TOKEN_STATES: Partial<Record<WorkerState, { error: string; cause: string }>> = { "await-approval": AWAIT_APPROVAL_FAILURE, plan: PLAN_FAILURE };
@@ -104,6 +115,10 @@ export interface WorkerDeps {
   taskTokens?: TaskTokens;
   /** The task token of AwaitApproval or Plan, from FACTORY_TASK_TOKEN. */
   taskToken?: string;
+  /** The state machine's executions, for `/abort`, `/resume` and a closed issue. */
+  executions?: Executions;
+  /** ECS, for stopping the task a stopped execution leaves running. */
+  ecsTasks?: EcsTasks;
   out: (text: string) => void;
   err: (text: string) => void;
 }
@@ -117,7 +132,7 @@ export async function runWorker(argv: string[], deps: WorkerDeps): Promise<numbe
     deps.err(`factory-worker: ${args.message}\n\n${USAGE}`);
     return WORKER_EXIT.invalid;
   }
-  const failure = TOKEN_STATES[args.state];
+  const failure = args.state === "intake" && args.resume === true ? ADOPT_FAILURE : TOKEN_STATES[args.state];
   const taskToken = failure === undefined ? undefined : deps.taskToken;
   if (failure !== undefined && (taskToken === undefined || taskToken === "")) {
     deps.err(`factory-worker: ${args.state} needs the task token in ${ENV.taskToken}\n`);
@@ -171,6 +186,8 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
   const issue = `issue #${String(issueNumber)}`;
   switch (state) {
     case "intake":
+      if (args.resume === true) return runAdopt(args, deps, token);
+      return report(state, issueNumber, await runHandler(args, deps), deps);
     case "proposal":
       return report(state, issueNumber, await runHandler(args, deps), deps);
     case "await-approval": {
@@ -214,15 +231,56 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
   }
 }
 
+/**
+ * Adopt, as a waitForTaskToken task: the execution resumes with `{ exitCode, entry, changeId,
+ * tasks }`, exit 0 with the entry state, or exit 4 (and nulls) with nothing to resume. Any error is
+ * reported with SendTaskFailure by runWorker.
+ */
+async function runAdopt(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | undefined): Promise<number> {
+  if (token === undefined) throw new InvalidInput(`intake --resume needs the task token in ${ENV.taskToken}`);
+  if (args.executionArn === undefined) throw new InvalidInput("intake --resume needs --execution");
+  const issue = `issue #${String(args.issueNumber)}`;
+  const adoption = await adopt({ db: deps.db, forge: deps.forge, target: deps.target }, { issueNumber: args.issueNumber, executionArn: args.executionArn });
+  const output =
+    adoption.kind === "entered"
+      ? { exitCode: WORKER_EXIT.ok, entry: adoption.entry, changeId: adoption.workItem.changeId, tasks: adoption.tasks }
+      : { exitCode: WORKER_EXIT.ended, entry: null, changeId: null, tasks: [] };
+  await requireTaskTokens(deps).succeed(token.value, JSON.stringify(output));
+  token.resumed = true;
+  if (adoption.kind === "entered") {
+    deps.out(`factory-worker: intake --resume for ${issue}: work item ${adoption.workItem.changeId} enters ${adoption.entry} (${adoption.workItem.state})\n`);
+    return WORKER_EXIT.ok;
+  }
+  deps.out(`factory-worker: intake --resume for ${issue}: nothing to resume: ${adoption.reason}\n`);
+  return WORKER_EXIT.ended;
+}
+
+/** The issue was closed: a running work item is stopped, with one comment. Exits 0 either way. */
+async function runClosed(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
+  const { db, forge, target, executions, ecsTasks } = deps;
+  const subject = `command for issue #${String(args.issueNumber)}, closed`;
+  const outcome = await handleIssueClosed({ db, forge, target, ...aws({ executions, ecsTasks }) }, args.issueNumber);
+  if (outcome.stopTaskError !== undefined) deps.err(`factory-worker: ${subject}: StopTask failed, and the abort went on: ${messageOf(outcome.stopTaskError)}\n`);
+  const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId}`;
+  deps.out(`factory-worker: ${subject}: ${outcome.outcome === "aborted" ? `${workItem} aborted` : `nothing runs (${workItem})`}\n`);
+  return WORKER_EXIT.ok;
+}
+
+/** The AWS clients the handler takes, without the ones that are not configured. */
+function aws(clients: { executions: Executions | undefined; ecsTasks: EcsTasks | undefined }): { executions?: Executions; ecsTasks?: EcsTasks } {
+  return { ...(clients.executions === undefined ? {} : { executions: clients.executions }), ...(clients.ecsTasks === undefined ? {} : { ecsTasks: clients.ecsTasks }) };
+}
+
 /** One owner command; see the module comment for its exit codes. */
 async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
   const { issueNumber, commentId } = args;
+  if (args.closed === true) return runClosed(args, deps);
   if (commentId === undefined) throw new InvalidInput("command needs --comment");
   const { db, forge, target } = deps;
   const subject = `command for issue #${String(issueNumber)}, comment ${String(commentId)}`;
   let outcome;
   try {
-    const ctx = { db, forge, target };
+    const ctx = { db, forge, target, ...aws({ executions: deps.executions, ecsTasks: deps.ecsTasks }) };
     outcome = await handleCommand(
       {
         ...ctx,
@@ -245,6 +303,7 @@ async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
   const command = `/${outcome.command.written}`;
   const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId} in ${outcome.workItem.state}`;
   if (outcome.commentError !== undefined) deps.err(`factory-worker: ${subject}: the confirmation comment failed: ${messageOf(outcome.commentError)}\n`);
+  if (outcome.stopTaskError !== undefined) deps.err(`factory-worker: ${subject}: StopTask failed, and the abort went on: ${messageOf(outcome.stopTaskError)}\n`);
   if (outcome.error !== undefined) {
     deps.err(`factory-worker: ${subject}: ${command} did not go through for ${workItem}: ${messageOf(outcome.error)}\n`);
     return WORKER_EXIT.error;

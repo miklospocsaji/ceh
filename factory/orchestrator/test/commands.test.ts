@@ -299,7 +299,7 @@ describe("handleCommand: commands that arrive while a role runs", () => {
     expect(reply).toMatch(/`\/approve`/);
 
     // The proposal later comes to await approval; the busy /approve is not applied then.
-    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval");
+    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval", { from: "proposal" });
     await openApproval(db.pool, { workItemId: workItem.id, taskToken: TOKEN });
 
     expect(taskTokens.successes).toEqual([]);
@@ -369,28 +369,6 @@ describe("handleCommand: unknown commands", () => {
     expect(outcome.outcome).toBe("unknown");
     expect(replies()).toEqual([expect.stringMatching(/unknown command/i)]);
     expect(replies()[0]).toContain("`/Approve`");
-  });
-});
-
-describe("handleCommand: commands of the later M3.5 changes (interim reply)", () => {
-  // `/revise` and `/question` came with add-approval-feedback; `/abort` and `/resume` come with add-work-item-resume.
-  const cases = ["abort", "resume"].flatMap((verb) => [...ALL_STATES, undefined].map((state) => [verb, state] as const));
-
-  it.each(cases)("answers /%s in %s as not yet available, changing nothing", async (verb, state) => {
-    if (state !== undefined) await workItemIn(state);
-    if (state === "awaiting-proposal-approval") {
-      const workItem = await findWorkItemByIssue(db.pool, TARGET.repository, ISSUE);
-      await openApproval(db.pool, { workItemId: workItem?.id ?? "", taskToken: TOKEN });
-    }
-
-    const outcome = await command(`/${verb} some text`);
-
-    expect(outcome.outcome).toBe("refused");
-    expect(taskTokens.successes).toEqual([]);
-    expect(replies()).toHaveLength(1);
-    expect(replies()[0]).toContain(`\`/${verb}\``);
-    expect(replies()[0]).toMatch(/not yet available/i);
-    expect(await stateOf()).toBe(state);
   });
 });
 

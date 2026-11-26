@@ -217,7 +217,7 @@ describe("factory run", () => {
     const factory = cli();
     expect((await factory.run(RUN, [VALID])).code).toBe(EXIT_CODES.ok);
     const workItem = await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number);
-    await setWorkItemState(db.pool, workItem?.id ?? "", "proposal-approved");
+    await setWorkItemState(db.pool, workItem?.id ?? "", "proposal-approved", { from: "awaiting-proposal-approval" });
     const comments = forge.comments.length;
 
     // No scripted steps: any agent run would fail the fake.

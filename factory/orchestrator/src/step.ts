@@ -15,6 +15,11 @@
  * Limits per task: MAX_TEST_AUTHOR_ATTEMPTS failed test author attempts, MAX_IMPLEMENTER_ATTEMPTS
  * implementer sessions and MAX_INFRA_FAILURES `infra` labels. Builds after `infra` and the
  * gates-only re-run after the first `flaky` count toward neither role's limit.
+ *
+ * After a `/resume` (add-work-item-resume): an attempt closed `aborted` counts for nothing; a
+ * resumed escalation's limits and last label start again from the `/resume`, while its committed
+ * tests and the last failure's evidence carry over; and the first build gets the `/resume` text in
+ * its `input.json`, never in the execution.
  */
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -46,6 +51,7 @@ import { escalateWith } from "./escalation.ts";
 import { fence } from "./evidence.ts";
 import { commitPaths, ensureWorktree, type GitIdentity } from "./git.ts";
 import type { HandlerContext } from "./handler.ts";
+import { resumeGuidance, retriesSince } from "./resume.ts";
 
 const run = promisify(execFile);
 const MAX_BUFFER = 256 * 1024 * 1024;
@@ -260,10 +266,18 @@ interface History {
   flakyUsed: boolean;
 }
 
-function replay(ctx: StepContext, attempts: readonly AttemptRow[]): History {
+function replay(ctx: StepContext, attempts: readonly AttemptRow[], resetAt: Date | undefined): History {
   const h: History = { tested: false, testFailures: 0, sessions: 0, infra: 0, evidence: undefined, last: undefined, mode: "session", session: undefined, flakyUsed: false };
+  // A resumed escalation starts its counts again; what is committed, and the evidence, stay.
+  const reset = () => Object.assign(h, { testFailures: 0, sessions: 0, infra: 0, last: undefined, mode: "session", session: undefined, flakyUsed: false });
+  let resetDone = resetAt === undefined;
   for (const attempt of attempts) {
     if (attempt.role !== ctx.testAuthor.name && attempt.role !== ctx.implementer.name) continue;
+    if (attempt.outcome === "aborted") continue;
+    if (!resetDone && resetAt !== undefined && attempt.startedAt > resetAt) {
+      reset();
+      resetDone = true;
+    }
     const label = classificationOf(attempt);
     h.last = label === undefined ? undefined : { ...label, attempt };
     if (attempt.outcome === "succeeded") {
@@ -293,6 +307,7 @@ function replay(ctx: StepContext, attempts: readonly AttemptRow[]): History {
     h.mode = "session";
     h.evidence = evidenceOf(attempt, label);
   }
+  if (!resetDone) reset();
   return h;
 }
 
@@ -307,7 +322,7 @@ function evidenceOf(attempt: AttemptRow, label: { kind: string; evidence: string
 }
 
 async function decide(ctx: StepContext, item: WorkItemRow, task: TaskRow, worktree: string): Promise<StepResult> {
-  const h = replay(ctx, await taskAttempts(ctx, item, task));
+  const h = replay(ctx, await taskAttempts(ctx, item, task), await retriesSince(ctx.db, item.id));
   const label = h.last;
 
   if (label?.kind === "design-flaw") {
@@ -315,7 +330,7 @@ async function decide(ctx: StepContext, item: WorkItemRow, task: TaskRow, worktr
       return escalate(ctx, item, `Task ${describe(task)} failed with a design flaw, the ${ordinal(item.designFlaws + 1)} in this work item, so the design goes to the owner.`, label.evidence, "design-flaw limit");
     }
     await incrementDesignFlaws(ctx.db, item.id);
-    return { kind: "design-flaw", workItem: await setWorkItemState(ctx.db, item.id, "design") };
+    return { kind: "design-flaw", workItem: await setWorkItemState(ctx.db, item.id, "design", { from: BUILD }) };
   }
   if (label?.kind === "spec-ambiguity") {
     return escalate(ctx, item, `Task ${describe(task)} failed its green gates, and the failure classifier found the spec ambiguous. The owner's answer to this question is needed:`, label.evidence, "spec-ambiguity");
@@ -361,6 +376,7 @@ async function writeBuild(ctx: StepContext, item: WorkItemRow, task: TaskRow, wo
   const n = (await listAttempts(db, item.id)).filter((attempt) => attempt.taskId === task.taskId && attempt.role === request.role).length + 1;
   const prefix = `${taskPrefix(item.changeId, task.taskId)}/${request.role}/${String(n)}`;
   const implementing = request.role === ctx.implementer.name;
+  const guidance = await resumeGuidance(db, item.id);
   const covered = implementing
     ? (await listTasks(db, item.id)).filter((row) => row.status === "done" || row.taskId === task.taskId).flatMap((row) => row.scenarios)
     : undefined;
@@ -374,11 +390,12 @@ async function writeBuild(ctx: StepContext, item: WorkItemRow, task: TaskRow, wo
     task: { id: task.taskId, title: task.title, dependsOn: task.dependsOn, files: task.files, scenarios: task.scenarios, tests: task.tests },
     ...(request.evidence === undefined ? {} : { evidence: request.evidence }),
     ...(covered === undefined ? {} : { coveredSoFar: covered }),
+    ...(guidance === undefined ? {} : { ownerGuidance: guidance.text }),
   };
   const next: NextBuild = { role: request.role, mode: request.mode, input: `${prefix}/input.json`, ...(request.patch === undefined ? {} : { patch: request.patch }) };
   await store.put(next.input, `${JSON.stringify(input, null, 2)}\n`);
   await store.put(nextBuildKey(item.changeId, task.taskId), `${JSON.stringify(next, null, 2)}\n`);
-  await openAttempt(db, { workItemId: item.id, state: BUILD, role: request.role, taskId: task.taskId, storePrefix: prefix });
+  await openAttempt(db, { workItemId: item.id, state: BUILD, role: request.role, taskId: task.taskId, storePrefix: prefix, ...(guidance === undefined ? {} : { commentIds: [guidance.commentId] }) });
   return { kind: "build", workItem: item, afterWait: request.afterWait };
 }
 

@@ -29,7 +29,7 @@ Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App request
 
 ### Handlers
 
-- [ ] 1.4 Failing command-handler tests with a fake Step Functions client (stop, describe, history, start) and a fake ECS client (stop task). Scenarios:
+- [x] 1.4 Failing command-handler tests with a fake Step Functions client (stop, describe, history, start) and a fake ECS client (stop task). Scenarios:
   - Abort during the build stops the execution (handler half)
   - Abort during Plan stops its task
   - Abort while awaiting approval closes the approval
@@ -44,29 +44,29 @@ Found in `add-approval-feedback`'s cloud check (`design.md`, "GitHub App request
   - Local work item points to the run command
 
   Also: a `--closed` task on a work item that is not running does nothing; the abort stops no task when the latest submitted task was closed in the history, or when the execution had already ended; a failed `StopTask` is logged and the abort goes on.
-- [ ] 1.5 Write the `/abort`, `/resume` and `--closed` branches, replacing their interim replies, and `command --closed` in the worker.
-- [ ] 1.6 Failing tests for Adopt (`intake --resume`) and the entry states. Scenarios:
+- [x] 1.5 Write the `/abort`, `/resume` and `--closed` branches, replacing their interim replies, and `command --closed` in the worker.
+- [x] 1.6 Failing tests for Adopt (`intake --resume`) and the entry states. Scenarios:
   - Resume at an approval asks again
   - Resume after approval asks for no second approval
   - Resume after an execution failed outside the factory (handler half: Adopt answers `plan`)
   - Resume during the build skips finished tasks (handler half: Adopt answers the unfinished tasks; Step skips the done ones)
 
   Also: Design for a work item in `design-review` runs only the reviewer; Adopt for a `pr-open` work item answers exit 4.
-- [ ] 1.7 Write Adopt in `intake.ts` and the entry checks in Design.
-- [ ] 1.8 Failing tests for retry counting and the duplicate comment. Scenarios:
+- [x] 1.7 Write Adopt in `intake.ts` and the entry checks in Design.
+- [x] 1.8 Failing tests for retry counting and the duplicate comment. Scenarios:
   - Aborted attempt does not count
   - Resumed escalation gets fresh retries
   - Escalation records where the work item stopped
   - Relabelling does not create a second work item (its text changed: the comment)
-- [ ] 1.9 Write the counting from the last resume, `stopped_in` on escalation, and the duplicate Intake's comment.
-- [ ] 1.10 Failing prompt and build-input tests, then the code. Scenario: Resume guidance reaches the next role.
+- [x] 1.9 Write the counting from the last resume, `stopped_in` on escalation, and the duplicate Intake's comment.
+- [x] 1.10 Failing prompt and build-input tests, then the code. Scenario: Resume guidance reaches the next role.
 
 ## Step 2: Network and data stack
 
 No network change.
 
-- [ ] 2.1 Failing tests against the local Postgres for migration 0007 and the compare-and-set update. Scenario: Late write after abort is refused. Also: an `aborted` attempt has no failure reason; an approval closes `aborted`; existing rows are unchanged.
-- [ ] 2.2 Write `factory/ledger/migrations/0007_resume.sql` and `setWorkItemState(…, { from })`; pass the expected state from every handler.
+- [x] 2.1 Failing tests against the local Postgres for migration 0007 and the compare-and-set update. Scenario: Late write after abort is refused. Also: an `aborted` attempt has no failure reason; an approval closes `aborted`; existing rows are unchanged.
+- [x] 2.2 Write `factory/ledger/migrations/0007_resume.sql` and `setWorkItemState(…, { from })`; pass the expected state from every handler.
 - [ ] 2.3 Failing CDK assertion tests, then the stack: the worker's four Step Functions actions, `ecs:StopTask` on the cluster's tasks and `FACTORY_STATE_MACHINE_ARN`. Scenario: Worker may control only its own executions.
 - [ ] 2.4 Write ADR 0016 (resuming work items), with the spike's result, and amend ADR 0003 (the M3.5 ledger) and ADR 0015 (`/abort`, `/resume`, the closed issue).
 

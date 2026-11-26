@@ -192,7 +192,7 @@ export async function approved(ctx: ApprovedContext, workItem: WorkItemRow): Pro
   if (workItem.state === AWAITING) {
     const next = reading.ok ? ` As a \`${reading.complexity}\` change, ${NEXT_STEP[reading.complexity]}.` : "";
     await ctx.forge.comment(workItem.issueNumber, `The proposal \`${workItem.changeId}\` is approved. The work item is now \`${APPROVED}\`.${next}`);
-    current = await setWorkItemState(ctx.db, workItem.id, APPROVED);
+    current = await setWorkItemState(ctx.db, workItem.id, APPROVED, { from: AWAITING });
   }
 
   if (!reading.ok) {
@@ -224,7 +224,7 @@ export async function escalateWorkItem(ctx: HandlerContext, issueNumber: number,
     issueNumber,
     `The factory escalated ${subject} to the owner after an infrastructure failure (\`${reason}\`): ${ESCALATION_SUMMARY[reason]}. The Step Functions execution has the details.`,
   );
-  return workItem === undefined ? undefined : setWorkItemState(ctx.db, workItem.id, ESCALATED);
+  return workItem === undefined ? undefined : setWorkItemState(ctx.db, workItem.id, ESCALATED, { from: workItem.state });
 }
 
 /**
@@ -300,12 +300,12 @@ export async function revise(ctx: ApproveContext, workItem: WorkItemRow, by: str
   if (back === undefined) throw new NotApplicable(`work item ${workItem.changeId} is ${workItem.state}, not awaiting approval`);
   const approval = await closeApproval(ctx.db, workItem.id, by, "revise");
   if (approval === undefined) return { kind: "nothing-awaits", workItem };
-  const moved = await setWorkItemState(ctx.db, workItem.id, back);
+  const moved = await setWorkItemState(ctx.db, workItem.id, back, { from: workItem.state });
   try {
     await ctx.taskTokens.succeed(approval.taskToken, REVISE_OUTPUT);
   } catch (error) {
     await reopenApproval(ctx.db, approval.id);
-    await setWorkItemState(ctx.db, workItem.id, workItem.state);
+    await setWorkItemState(ctx.db, workItem.id, workItem.state, { from: back });
     return { kind: "resume-failed", workItem, approval: approval.kind, error };
   }
   return { kind: "revised", workItem: moved, approval: approval.kind };

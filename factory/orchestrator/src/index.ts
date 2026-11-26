@@ -1,8 +1,8 @@
 export { CHANGE_ID_MAX_LENGTH, CHANGE_ID_VERBS, deriveChangeId } from "./change-id.ts";
 export type { IsTaken } from "./change-id.ts";
 export type { HandlerContext, Route, Transition, WorkItemState } from "./handler.ts";
-export { intake, MISSING_REQUIREMENT_COMMENT } from "./intake.ts";
-export type { IntakeItem } from "./intake.ts";
+export { adopt, ENTRIES, intake, MISSING_REQUIREMENT_COMMENT } from "./intake.ts";
+export type { AdoptItem, Adoption, Entry, IntakeItem } from "./intake.ts";
 export { MAX_PROPOSAL_ATTEMPTS, proposal } from "./proposal.ts";
 export type { ProposalContext } from "./proposal.ts";
 export { changeFileReader, ensureWorktree, FACTORY_GIT_IDENTITY, factoryHome, worktreePath } from "./git.ts";
@@ -24,8 +24,10 @@ export { approve, approved, awaitApproval, cloudApprover, cloudReviser, escalate
 export { readComplexity } from "./change-files.ts";
 export type { ComplexityReading } from "./change-files.ts";
 export type { ApproveContext, ApprovedContext, ApproveOutcome, Approver, AwaitApprovalContext, ReviseOutcome, Reviser, TaskTokens } from "./approval.ts";
-export { CommandFailed, handleCommand, InvalidCommand } from "./commands/handle.ts";
-export type { CommandApprover, CommandContext, CommandOutcome, QuestionContext } from "./commands/handle.ts";
+export { CommandFailed, handleCommand, handleIssueClosed, InvalidCommand } from "./commands/handle.ts";
+export type { ClosedContext, ClosedOutcome, CommandApprover, CommandContext, CommandOutcome, QuestionContext } from "./commands/handle.ts";
+export { ABORT_ERROR, clusterOf, latestOpenTask, resumeExecutionName } from "./commands/executions.ts";
+export type { EcsTasks, ExecutionEvent, Executions, ExecutionStatus } from "./commands/executions.ts";
 export { KNOWN_VERBS, parseCommand } from "./commands/parse.ts";
 export type { Command, KnownVerb } from "./commands/parse.ts";
 export { commandFailedReply } from "./commands/replies.ts";

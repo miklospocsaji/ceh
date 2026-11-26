@@ -15,17 +15,23 @@
  *    after the commit, so an `/approve` or `/revise` meanwhile goes through at once; its reply is
  *    the answer.
  *
- * | Work item state                  | /approve                       | /revise, /question            | /abort, /resume   | /status, /help | unknown |
- * | none                             | refused: nothing awaits        | refused: nothing awaits       | not yet available | applied        | unknown |
- * | intake … plan (a role runs)      | busy                           | busy                          | not yet available | applied        | unknown |
- * | awaiting-{proposal,design}-appr. | applied (refused if none open) | applied, or refused (limits)  | not yet available | applied        | unknown |
- * | build, escalated                 | refused: nothing awaits        | refused: nothing awaits       | not yet available | applied        | unknown |
- * | pr-open                          | refused: the PR is open        | refused: the PR is open       | not yet available | applied        | unknown |
+ * | Work item state                  | /approve                       | /revise, /question             | /abort              | /resume                  | /status, /help |
+ * | none                             | refused: nothing awaits        | refused: nothing awaits        | refused: nothing runs | refused: no work item  | applied        |
+ * | intake … plan (a role runs)      | busy                           | busy                           | applied: stops      | refused: running         | applied        |
+ * | awaiting-{proposal,design}-appr. | applied (refused if none open) | applied, or refused (limits)   | applied: stops      | refused: running         | applied        |
+ * | build                            | refused: nothing awaits        | refused: `/abort`, a new issue | applied: stops      | refused: running         | applied        |
+ * | aborted, escalated               | refused: `/resume`             | refused: `/resume`             | refused: nothing runs | applied: starts        | applied        |
+ * | pr-open                          | refused: the PR is open        | refused: the PR is open        | refused: nothing runs | refused: the PR is open | applied        |
  *
- * The busy check comes before "not yet available", so the owner learns the more useful fact first.
+ * An unknown verb is `unknown` in every state. `/resume` is "running" while DescribeExecution says
+ * so, whatever the state; a work item in a running state whose execution ended (stopped or failed
+ * outside the factory) can be resumed. A local run's work item, with no execution, answers `/abort`
+ * and `/resume` with `pnpm factory run` (add-work-item-resume).
  */
 import { ForgeError, type IssueComment } from "@ceh/factory-forge";
 import {
+  abortOpenAttempts,
+  closeApproval,
   closeAttempt,
   findOpenApproval,
   inTransaction,
@@ -34,6 +40,7 @@ import {
   openQuestionAttempt,
   recordComment,
   setCommentOutcome,
+  setWorkItemState,
   stageComments,
   stageQuestions,
   workItemCost,
@@ -46,19 +53,29 @@ import { QUESTION_BUDGET_USD, type Role, type RunRole } from "@ceh/factory-roles
 import type { Approver, Reviser } from "../approval.ts";
 import { MAX_QUESTIONS, MAX_REVISIONS } from "../feedback.ts";
 import type { HandlerContext } from "../handler.ts";
+import { ABORT_ERROR, clusterOf, latestOpenTask, resumeExecutionName, type EcsTasks, type Executions } from "./executions.ts";
 import { parseCommand, type Command, type KnownVerb } from "./parse.ts";
 import { answerQuestion, type PendingQuestion } from "./question.ts";
 import {
+  abortedReply,
   busyReply,
   helpReply,
-  notYetAvailableReply,
+  issueClosedComment,
+  localRunReply,
+  nothingAwaitsDuringBuildReply,
   nothingAwaitsReply,
+  nothingRunsReply,
   overBudgetReply,
   pullRequestOpenReply,
   questionBusyReply,
   questionLimitReply,
   questionNeedsTextReply,
+  resumeClosedIssueReply,
   resumeFailedReply,
+  resumeNoWorkItemReply,
+  resumePullRequestOpenReply,
+  resumeRunningReply,
+  resumingReply,
   revisedReply,
   reviseFailedReply,
   reviseNeedsTextReply,
@@ -81,6 +98,10 @@ export interface QuestionContext {
 }
 
 export interface CommandContext extends HandlerContext {
+  /** The state machine's executions, for `/abort`, `/resume` and a closed issue; absent in a local run. */
+  executions?: Executions;
+  /** ECS, for stopping the task a stopped execution leaves running; absent in a local run. */
+  ecsTasks?: EcsTasks;
   /** Applies an `/approve` to a work item awaiting approval: SendTaskSuccess in the cloud, the local approval in a local run. */
   approve: Approver;
   /** Applies a `/revise` that passed its checks: SendTaskSuccess with the decision `revise` in the cloud, the state alone locally. */
@@ -117,6 +138,87 @@ export interface CommandOutcome {
   error?: unknown;
   /** An applied `/approve` of a design whose confirmation could not be posted. */
   commentError?: unknown;
+  /** An `/abort` whose StopTask failed; the abort went on. */
+  stopTaskError?: unknown;
+}
+
+/** What a closed issue came to: the work item aborted, or nothing ran. */
+export interface ClosedOutcome {
+  outcome: "aborted" | "nothing";
+  workItem: WorkItemRow | undefined;
+  /** A StopTask that failed; the abort went on. */
+  stopTaskError?: unknown;
+}
+
+/** The context a closed issue needs: no command is applied, so no approver or question session. */
+export type ClosedContext = Pick<CommandContext, "db" | "forge" | "target" | "executions" | "ecsTasks">;
+
+/**
+ * The issue was closed (`command --issue <n> --closed`): a running work item is stopped as by
+ * `/abort`, and the issue gets one fixed comment. Anything else does nothing.
+ */
+export async function handleIssueClosed(ctx: ClosedContext, issueNumber: number): Promise<ClosedOutcome> {
+  const decided = await inTransaction(ctx.db, async (tx) => {
+    const workItem = await lockWorkItem(tx, ctx.target.repository, issueNumber);
+    if (workItem === undefined || !isRunning(workItem) || workItem.executionArn === null) return { workItem, stopped: undefined };
+    const stopped = await stopWorkItem({ ...ctx, db: tx }, workItem, { by: CLOSED_BY, cause: "The work item's issue was closed." });
+    return { workItem, stopped };
+  });
+  const { workItem, stopped } = decided;
+  if (stopped === undefined) return { outcome: "nothing", workItem };
+  await ctx.forge.comment(issueNumber, issueClosedComment(stopped.workItem, stopped.from));
+  return { outcome: "aborted", workItem, ...(stopped.stopTaskError === undefined ? {} : { stopTaskError: stopped.stopTaskError }) };
+}
+
+/** Who closed an approval when the issue was closed: no login is known, so a fixed name. */
+const CLOSED_BY = "issue-closed";
+/** The states with nothing to stop: the work item has stopped, or its pull request is open. */
+const NOT_RUNNING: readonly string[] = ["aborted", "escalated", "pr-open"];
+
+function isRunning(workItem: WorkItemRow): boolean {
+  return !NOT_RUNNING.includes(workItem.state);
+}
+
+interface Stopped {
+  workItem: WorkItemRow;
+  /** The state it stopped in. */
+  from: string;
+  stopTaskError?: unknown;
+}
+
+/**
+ * Stops a running work item (design, "Command handler: /abort and --closed"), under the caller's
+ * lock: StopExecution if its execution runs, with a fixed error and cause; then StopTask on the
+ * execution's latest submitted task that no later event closed, since Step Functions leaves a
+ * waitForTaskToken task (Plan, Adopt) running; then its open attempts and approval are closed
+ * `aborted` and the work item becomes `aborted`, recording where it stopped. A failed StopTask is
+ * reported and the abort goes on: the task's late writes are refused by compare-and-set.
+ */
+async function stopWorkItem(ctx: ClosedContext, workItem: WorkItemRow, why: { by: string; cause: string }): Promise<Stopped> {
+  const { executions, ecsTasks } = requireAws(ctx);
+  const arn = workItem.executionArn ?? "";
+  let stopTaskError: unknown;
+  if ((await executions.describe(arn)).status === "RUNNING") {
+    await executions.stop(arn, ABORT_ERROR, why.cause);
+    const task = latestOpenTask(await executions.history(arn));
+    const cluster = task === undefined ? undefined : clusterOf(task);
+    if (task !== undefined && cluster !== undefined) {
+      try {
+        await ecsTasks.stop(cluster, task, why.cause);
+      } catch (error) {
+        stopTaskError = error;
+      }
+    }
+  }
+  await abortOpenAttempts(ctx.db, workItem.id);
+  await closeApproval(ctx.db, workItem.id, why.by, "aborted");
+  const aborted = await setWorkItemState(ctx.db, workItem.id, "aborted", { from: workItem.state });
+  return { workItem: aborted, from: workItem.state, ...(stopTaskError === undefined ? {} : { stopTaskError }) };
+}
+
+function requireAws(ctx: ClosedContext): { executions: Executions; ecsTasks: EcsTasks } {
+  if (ctx.executions === undefined || ctx.ecsTasks === undefined) throw new Error("no Step Functions or ECS client configured");
+  return { executions: ctx.executions, ecsTasks: ctx.ecsTasks };
 }
 
 /** The states in which a role runs, so a command that needs the owner's turn is busy. */
@@ -127,7 +229,7 @@ const AWAITING: readonly string[] = ["awaiting-proposal-approval", "awaiting-des
 /** How long an open question attempt keeps a work item busy; older ones were left by a crash. */
 export const QUESTION_STALE_MS = 30 * 60 * 1000;
 
-type Decision = Pick<CommandOutcome, "error" | "commentError"> & { outcome: CommentOutcome; reply: string | undefined; question?: PendingQuestion };
+type Decision = Pick<CommandOutcome, "error" | "commentError" | "stopTaskError"> & { outcome: CommentOutcome; reply: string | undefined; question?: PendingQuestion };
 
 /**
  * What a comment row holds until its decision is known, inside the transaction that records it,
@@ -170,8 +272,15 @@ export async function handleCommand(ctx: CommandContext, issueNumber: number, co
     if (decision.reply !== undefined) await ctx.forge.comment(issueNumber, decision.reply);
     // A question's session runs after the commit, off the lock; its answer is the one reply.
     const error = decision.question === undefined ? decision.error : await answerQuestion(ctx, decision.question);
-    const { outcome, commentError } = decision;
-    return { outcome, command, workItem, ...(error === undefined ? {} : { error }), ...(commentError === undefined ? {} : { commentError }) };
+    const { outcome, commentError, stopTaskError } = decision;
+    return {
+      outcome,
+      command,
+      workItem,
+      ...(error === undefined ? {} : { error }),
+      ...(commentError === undefined ? {} : { commentError }),
+      ...(stopTaskError === undefined ? {} : { stopTaskError }),
+    };
   } catch (error) {
     throw new CommandFailed(command, error);
   }
@@ -194,6 +303,9 @@ async function decide(ctx: CommandContext, command: Command, workItem: WorkItemR
 
   const state = workItem?.state;
   if (state !== undefined && RUNNING.includes(state) && BUSY_VERBS.includes(verb)) return { outcome: "busy", reply: busyReply(state, command) };
+  if (state === "build" && (verb === "revise" || verb === "question") && workItem !== undefined) {
+    return { outcome: "refused", reply: nothingAwaitsDuringBuildReply(command, workItem) };
+  }
   switch (verb) {
     case "approve":
       return decideApprove(ctx, workItem);
@@ -201,9 +313,46 @@ async function decide(ctx: CommandContext, command: Command, workItem: WorkItemR
       return decideRevise(ctx, command, workItem);
     case "question":
       return decideQuestion(ctx, command, workItem, recorded);
-    default:
-      return { outcome: "refused", reply: notYetAvailableReply(command) };
+    case "abort":
+      return decideAbort(ctx, command, workItem, recorded);
+    case "resume":
+      return decideResume(ctx, command, workItem, recorded);
   }
+}
+
+/** `/abort` (design, "Command handler: /abort and --closed"): stops a running work item. */
+async function decideAbort(ctx: CommandContext, command: Command, workItem: WorkItemRow | undefined, recorded: CommentRow): Promise<Decision> {
+  if (workItem === undefined || !isRunning(workItem)) return { outcome: "refused", reply: nothingRunsReply(command, workItem) };
+  if (workItem.executionArn === null) return { outcome: "refused", reply: localRunReply(command, workItem) };
+  // A fixed cause naming the comment, never its text: the execution's history keeps it.
+  const stopped = await stopWorkItem(ctx, workItem, { by: ctx.target.owner, cause: `Aborted by the owner's comment ${String(recorded.githubCommentId)}.` });
+  return { outcome: "applied", reply: abortedReply(stopped.workItem, stopped.from), ...(stopped.stopTaskError === undefined ? {} : { stopTaskError: stopped.stopTaskError }) };
+}
+
+/**
+ * `/resume` (design, "Command handler: /resume"): starts a new execution, `issue-<n>-resume-<comment
+ * id>` with `{ issueNumber, resume: true }`, once the work item's execution has ended, its issue is
+ * open and its pull request is not. A name taken already (a redelivery) counts as started. The new
+ * execution's Adopt stores its ARN, so a start that never ran can be repeated; the comment's text is
+ * the guidance the next role gets.
+ */
+async function decideResume(ctx: CommandContext, command: Command, workItem: WorkItemRow | undefined, recorded: CommentRow): Promise<Decision> {
+  if (workItem === undefined) return { outcome: "refused", reply: resumeNoWorkItemReply(command) };
+  if (workItem.executionArn === null) return { outcome: "refused", reply: localRunReply(command, workItem) };
+  if (workItem.state === "pr-open") {
+    const pr = await ctx.forge.findPullRequest(workItem.branch);
+    return { outcome: "refused", reply: resumePullRequestOpenReply(command, workItem, pr?.url) };
+  }
+  if ((await ctx.forge.getIssue(workItem.issueNumber)).state === "closed") return { outcome: "refused", reply: resumeClosedIssueReply(command, workItem) };
+  if (ctx.executions === undefined) throw new Error("no Step Functions client configured");
+  const { executions } = ctx;
+  if ((await executions.describe(workItem.executionArn)).status === "RUNNING") return { outcome: "refused", reply: resumeRunningReply(command, workItem) };
+  try {
+    await executions.start(resumeExecutionName(workItem.issueNumber, recorded.githubCommentId), JSON.stringify({ issueNumber: workItem.issueNumber, resume: true }));
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "ExecutionAlreadyExists")) throw error;
+  }
+  return { outcome: "applied", reply: resumingReply(workItem, command.text !== "") };
 }
 
 async function decideApprove(ctx: CommandContext, workItem: WorkItemRow | undefined): Promise<Decision> {

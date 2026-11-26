@@ -102,6 +102,8 @@ export const BuildInput = z.strictObject({
   evidence: z.strictObject({ reason: z.string().min(1), evidence: z.string() }).optional(),
   /** Green gates: the scenario titles of every task done so far, this one included. */
   coveredSoFar: z.array(z.string()).optional(),
+  /** The text of the `/resume` that started the execution, for the first build after it (add-work-item-resume). */
+  ownerGuidance: z.string().min(1).optional(),
 });
 export type BuildInput = z.infer<typeof BuildInput>;
 
@@ -311,6 +313,7 @@ async function build(deps: BuildDeps, target: Target, role: Role, input: BuildIn
       task,
       changeFiles: await changeFiles(worktree, changeId),
       ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+      ...(input.ownerGuidance === undefined ? {} : { ownerGuidance: input.ownerGuidance }),
     });
     try {
       roleResult = await runRole(role, {

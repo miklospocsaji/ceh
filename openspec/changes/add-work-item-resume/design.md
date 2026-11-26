@@ -83,7 +83,7 @@ Each entry state must accept a work item already in its own state, as Approved d
 
 ### Retry counts
 
-Retry limits count failed attempts since the latest of: the run's start (as today, and `add-approval-feedback`'s revisions) and the work item's last applied `/resume`. Attempts closed `aborted` are not counted. The same rule applies to the design-flaw count, so a work item escalated for its third design flaw gets a fresh count on resume.
+Retry limits count failed attempts since the latest of: the run's start (as today, and `add-approval-feedback`'s revisions) and the work item's last applied `/resume` that met it `escalated` (`comments.state_met`). Attempts closed `aborted` are not counted. A `/resume` of an aborted work item resets nothing: the failed attempts before the abort still count, so an abort cannot be used to retry for free (scenario "Aborted attempt does not count": one failed attempt and one aborted leave two more). The same rule applies to the design-flaw count: Adopt resets it for an escalated work item only, so a work item escalated for its third design flaw gets a fresh count on resume. In the build loop, an escalated resume restarts the task's limits and its last label, while its committed tests and the last failure's evidence carry over.
 
 ### Owner guidance
 
@@ -146,7 +146,7 @@ No contracts path in `ceh`; the changed types are `BuildInput.ownerGuidance` and
 
 ## Decisions that need an ADR
 
-- **ADR 0016 Resuming work items (new):** `/resume` only; a new execution per resume with Intake adopting the work item; entry from the work item's state or `stopped_in`; aborted as paused, closing the issue as the final stop; aborted attempts never count, resumes reset retries; compare-and-set state updates; the stop spike's result.
+- **ADR 0016 Resuming work items (new):** `/resume` only; a new execution per resume with Intake adopting the work item; entry from the work item's state or `stopped_in`; aborted as paused, closing the issue as the final stop; aborted attempts never count, resuming an escalated work item resets its retries (resuming an aborted one does not); compare-and-set state updates; the stop spike's result.
 - **ADR 0015 amendment:** `/abort`, `/resume` and the closed issue.
 - **ADR 0002 amendment:** the start Choice and Adopt; the worker stopping and starting executions.
 - **ADR 0003 amendment:** `aborted`, `stopped_in`, and the M3.5 tables and columns together.

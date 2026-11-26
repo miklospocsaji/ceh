@@ -226,7 +226,7 @@ describe("handleCommand: redeliveries", () => {
     const id = posted("/approve");
 
     await handleCommand(context(), ISSUE, id);
-    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval");
+    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval", { from: "proposal" });
     await openApproval(db.pool, { workItemId: workItem.id, taskToken: TOKEN });
     const redelivered = await handleCommand(context(), ISSUE, id);
 
@@ -244,7 +244,7 @@ describe("handleCommand: owner interventions", () => {
 
     await handleCommand(context(), ISSUE, posted("/status"));
     await handleCommand(context(), ISSUE, posted("/approve"));
-    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval");
+    await setWorkItemState(db.pool, workItem.id, "awaiting-proposal-approval", { from: "proposal" });
     await openApproval(db.pool, { workItemId: workItem.id, taskToken: TOKEN });
     await handleCommand(context(), ISSUE, posted("/approve"));
 

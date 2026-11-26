@@ -23,6 +23,7 @@ import { FsStore } from "../src/store.ts";
 import { runWorker, WORKER_EXIT, type WorkerDeps, type WorkerIdentity, type WorkerRoles } from "../src/worker.ts";
 import { workerConfig } from "../src/config.ts";
 import { FakeTaskTokens } from "./fake-task-tokens.ts";
+import { FakeEcsTasks, FakeExecutions } from "../../orchestrator/test/fake-executions.ts";
 import { cloneUrl } from "@ceh/factory-target";
 import { testTarget } from "@ceh/factory-target/testing";
 
@@ -455,7 +456,11 @@ describe("factory-worker intake in the cloud", () => {
     expect(after?.state).toBe("awaiting-proposal-approval");
     expect(after?.updatedAt).toEqual(before?.updatedAt);
     expect(remoteBranches()).toEqual(branches);
-    expect(forge.comments).toHaveLength(comments);
+    // One comment: the work item, its state, and that /resume continues it.
+    expect(forge.comments).toHaveLength(comments + 1);
+    expect(forge.comments.at(-1)?.body).toContain(`\`${CHANGE_ID}\``);
+    expect(forge.comments.at(-1)?.body).toContain("`awaiting-proposal-approval`");
+    expect(forge.comments.at(-1)?.body).toContain("`/resume`");
     expect(w.calls).toHaveLength(1);
   });
 
@@ -719,7 +724,8 @@ describe("factory-worker command", () => {
     expect((await w.run(cloudIntake())).code).toBe(WORKER_EXIT.ok);
 
     expect((await w.run(commandFor("/approve"))).code).toBe(WORKER_EXIT.ok);
-    expect((await w.run(commandFor("/abort"))).code).toBe(WORKER_EXIT.ok);
+    // Refused: the execution runs, so there is nothing to resume.
+    expect((await w.run(commandFor("/resume"), [], { executions: new FakeExecutions() })).code).toBe(WORKER_EXIT.ok);
     expect((await w.run(commandFor("/aprove"))).code).toBe(WORKER_EXIT.ok);
 
     expect(forge.comments).toHaveLength(3);
@@ -1123,5 +1129,87 @@ describe("factory-worker step and open-pr", { timeout: 120_000 }, () => {
     expect((await w.run(openPr())).code).toBe(WORKER_EXIT.invalid);
     expect(forge.pullRequests).toEqual([]);
     expect(await stateOf()).toBe("build");
+  });
+});
+
+describe("factory-worker: /abort, /resume and a closed issue (add-work-item-resume)", () => {
+  const NEW_EXECUTION = "arn:aws:states:eu-central-1:123456789012:execution:factory-work-item:issue-12-resume-77";
+  const TASK = "arn:aws:ecs:eu-central-1:123456789012:task/factory-cluster/0a1b2c3d";
+  const closed = (n = ISSUE.number) => ["command", "--issue", String(n), "--closed"];
+  const adoptArgs = (n = ISSUE.number) => ["intake", "--issue", String(n), "--resume", "--execution", NEW_EXECUTION];
+  let executions: FakeExecutions;
+  let ecsTasks: FakeEcsTasks;
+
+  beforeEach(() => {
+    executions = new FakeExecutions();
+    ecsTasks = new FakeEcsTasks();
+    executions.histories.set(EXECUTION, [{ type: "TaskSubmitted", taskSubmittedEventDetails: { output: JSON.stringify({ Tasks: [{ TaskArn: TASK }] }) } }]);
+  });
+
+  it("aborts a running work item for `command --closed`, with one comment, and exits 0", async () => {
+    const w = worker();
+    await awaiting(w);
+    const comments = forge.comments.length;
+
+    const { code, out } = await w.run(closed(), [], { executions, ecsTasks });
+
+    expect(code).toBe(WORKER_EXIT.ok);
+    expect(executions.stops.map((stop) => stop.executionArn)).toEqual([EXECUTION]);
+    expect(ecsTasks.stops.map((stop) => stop.taskArn)).toEqual([TASK]);
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number)).toMatchObject({ state: "aborted", stoppedIn: "awaiting-proposal-approval" });
+    expect(forge.comments).toHaveLength(comments + 1);
+    expect(out).toContain("closed");
+  });
+
+  it("does nothing for `command --closed` on an issue with nothing running, and exits 0", async () => {
+    const { code } = await worker().run(closed(), [], { executions, ecsTasks });
+
+    expect(code).toBe(WORKER_EXIT.ok);
+    expect(executions.stops).toEqual([]);
+    expect(forge.comments).toEqual([]);
+  });
+
+  it("applies /abort with the worker's Step Functions and ECS clients, and logs a failed StopTask", async () => {
+    const w = worker();
+    await awaiting(w);
+    ecsTasks.failNextStop = new Error("AccessDeniedException: ecs:StopTask");
+
+    const { code, err } = await w.run(commandFor("/abort"), [], { executions, ecsTasks });
+
+    expect(code).toBe(WORKER_EXIT.ok);
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number)).toMatchObject({ state: "aborted" });
+    expect(err).toContain("StopTask");
+    expect(err).toContain("AccessDeniedException");
+  });
+
+  it("runs Adopt as `intake --resume`, resuming the execution with the entry, the change id and the unfinished tasks", async () => {
+    const w = worker();
+    await awaiting(w);
+    expect((await w.run(commandFor("/abort"), [], { executions, ecsTasks })).code).toBe(WORKER_EXIT.ok);
+    expect((await w.run(commandFor("/resume"), [], { executions, ecsTasks })).code).toBe(WORKER_EXIT.ok);
+    expect(executions.starts).toHaveLength(1);
+
+    const { code } = await w.run(adoptArgs(), [], { taskToken: TOKEN });
+
+    expect(code).toBe(WORKER_EXIT.ok);
+    expect(taskTokens.successes.map((success) => ({ ...success, output: JSON.parse(success.output) as unknown }))).toEqual([
+      { taskToken: TOKEN, output: { exitCode: WORKER_EXIT.ok, entry: "await-approval", changeId: CHANGE_ID, tasks: [] } },
+    ]);
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number)).toMatchObject({ state: "awaiting-proposal-approval", executionArn: NEW_EXECUTION, stoppedIn: null });
+  });
+
+  it("answers exit 4 through the token when there is nothing to resume", async () => {
+    const { code } = await worker().run(adoptArgs(), [], { taskToken: TOKEN });
+
+    expect(code).toBe(WORKER_EXIT.ended);
+    expect(taskTokens.successes.map((success) => JSON.parse(success.output) as unknown)).toEqual([{ exitCode: WORKER_EXIT.ended, entry: null, changeId: null, tasks: [] }]);
+  });
+
+  it("refuses `intake --resume` without its task token, and without the execution", async () => {
+    const w = worker();
+
+    expect((await w.run(adoptArgs())).code).toBe(WORKER_EXIT.invalid);
+    expect((await w.run(["intake", "--issue", String(ISSUE.number), "--resume"], [], { taskToken: TOKEN })).code).toBe(WORKER_EXIT.invalid);
+    expect(taskTokens.successes).toEqual([]);
   });
 });

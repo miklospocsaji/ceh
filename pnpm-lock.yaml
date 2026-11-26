@@ -357,6 +357,9 @@ importers:
 
   factory/worker:
     dependencies:
+      '@aws-sdk/client-ecs':
+        specifier: 3.1161.0
+        version: 3.1161.0
       '@aws-sdk/client-s3':
         specifier: 3.1161.0
         version: 3.1161.0
@@ -398,9 +401,6 @@ importers:
         specifier: 3.1161.0
         version: 3.1161.0
       '@aws-sdk/client-cloudwatch-logs':
-        specifier: 3.1161.0
-        version: 3.1161.0
-      '@aws-sdk/client-ecs':
         specifier: 3.1161.0
         version: 3.1161.0
       '@types/pg':

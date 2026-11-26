@@ -5,6 +5,8 @@ export type { Queryable, WaitOptions } from "./connection.ts";
 export { databaseUrl, DATABASE_URL_VAR, LOCAL_DATABASE_URL } from "./env.ts";
 export { migrate } from "./migrate.ts";
 export {
+  abortOpenAttempts,
+  adoptWorkItem,
   ApprovalAlreadyOpen,
   ChangeIdTaken,
   closeApproval,
@@ -33,10 +35,12 @@ export {
   setAttemptClassification,
   setCommentOutcome,
   setWorkItemState,
+  StateChanged,
   storePlan,
   workItemCost,
 } from "./queries.ts";
 export type {
+  Adoption as WorkItemAdoption,
   ApprovalKind,
   ApprovalOutcome,
   ApprovalRow,

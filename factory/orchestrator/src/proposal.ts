@@ -9,6 +9,9 @@
  * from the branch head, so the owner's own pushes are kept; the author gets the stage's `/revise`
  * comments and answered questions; its attempts are counted from the latest `/revise`; its result
  * must say what changed; and its commit says it revises the proposal.
+ *
+ * After a `/resume` (add-work-item-resume), attempts closed `aborted` do not count, a resumed
+ * escalation counts from the `/resume`, and the first attempt gets the `/resume` text.
  */
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
@@ -22,6 +25,7 @@ import { renderEvidence } from "./evidence.ts";
 import { NO_WHAT_CHANGED, revisionRun, saysWhatChanged, stageFeedback, type AttemptFailure } from "./feedback.ts";
 import { commitChange, ensureWorktree, resetToRemoteHead, type GitIdentity } from "./git.ts";
 import type { HandlerContext, Transition, WorkItemState } from "./handler.ts";
+import { counts, resumeGuidance, retriesSince } from "./resume.ts";
 
 const run = promisify(execFile);
 
@@ -67,7 +71,9 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
   // A crash can leave an attempt open; it counts as failed, and toward the run's limit.
   const all = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === PROPOSAL);
   for (const attempt of all.filter(isOpen)) await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "error" });
-  const previous = all.filter((attempt) => since === undefined || attempt.startedAt > since);
+  const resetAt = await retriesSince(db, item.id);
+  const previous = all.filter((attempt) => counts(attempt, resetAt) && (since === undefined || attempt.startedAt > since));
+  let guidance = await resumeGuidance(db, item.id);
 
   let used = previous.length;
   let last: AttemptFailure | undefined;
@@ -82,9 +88,12 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
       changeFiles: await changeFiles(worktree, item.changeId),
       specs: await currentSpecs(worktree),
       ...(revision ? { ownerFeedback: stage.feedback } : {}),
+      ...(guidance === undefined ? {} : { ownerGuidance: { text: guidance.text } }),
     };
 
-    const attempt = await openAttempt(db, { workItemId: item.id, state: PROPOSAL, role: role.name, ...(revision ? { commentIds: stage.commentIds } : {}) });
+    const commentIds = [...(revision ? stage.commentIds : []), ...(guidance === undefined ? [] : [guidance.commentId])];
+    guidance = undefined;
+    const attempt = await openAttempt(db, { workItemId: item.id, state: PROPOSAL, role: role.name, commentIds });
     let result: unknown;
     try {
       result = await runRole(role, workItem, evidence);
@@ -123,7 +132,7 @@ export async function proposal(ctx: ProposalContext, item: WorkItemRow): Promise
         : `docs(${item.changeId}): propose the change\n\nWritten by the ${role.name} role for issue #${String(item.issueNumber)}.`,
     });
     await forge.pushBranch({ worktree, branch: item.branch });
-    return { kind: "advance", workItem: await setWorkItemState(db, item.id, NEXT), result };
+    return { kind: "advance", workItem: await setWorkItemState(db, item.id, NEXT, { from: PROPOSAL }), result };
   }
 
   return escalate(ctx, item, used, last);
@@ -140,7 +149,7 @@ async function escalate(ctx: ProposalContext, item: WorkItemRow, used: number, l
     ...(last === undefined ? [] : ["Evidence from the last attempt:", renderEvidence(last.evidence)]),
   ].join("\n\n");
   await ctx.forge.comment(item.issueNumber, body);
-  const workItem = await setWorkItemState(ctx.db, item.id, ESCALATED);
+  const workItem = await setWorkItemState(ctx.db, item.id, ESCALATED, { from: item.state });
   return { kind: "escalate", workItem, reason: `proposal escalated after ${String(used)} attempt(s): ${reason}` };
 }
 

@@ -77,7 +77,7 @@ describe("migration 0006: approval outcomes", () => {
       await old.pool.query("INSERT INTO approvals (work_item_id, state, task_token) VALUES ($1, 'open', 't2')", [second]);
       await old.pool.query("INSERT INTO attempts (work_item_id, state, role, n) VALUES ($1, 'proposal', 'proposal-author', 1)", [first]);
 
-      expect(await migrate(old.pool)).toEqual(["0006_approval_feedback"]);
+      expect(await migrate(old.pool)).toEqual(["0006_approval_feedback", "0007_resume"]);
 
       const approvals = await old.pool.query<{ task_token: string; outcome: string | null }>("SELECT task_token, outcome FROM approvals ORDER BY id");
       expect(approvals.rows).toEqual([

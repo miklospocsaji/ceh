@@ -19,9 +19,11 @@ export type WorkerState = (typeof WORKER_STATES)[number];
 export const USAGE = [
   "Usage: factory-worker <state> --issue <n> [options]",
   "  intake --issue <n> [--execution <arn>]",
+  "  intake --issue <n> --resume --execution <arn>   (the task token in FACTORY_TASK_TOKEN)",
   "  proposal --issue <n>",
   "  await-approval --issue <n> [--kind proposal|design]   (the task token in FACTORY_TASK_TOKEN)",
   "  command --issue <n> --comment <id>",
+  "  command --issue <n> --closed",
   "  approved --issue <n>",
   "  design --issue <n>",
   "  plan --issue <n>                    (the task token in FACTORY_TASK_TOKEN)",
@@ -33,10 +35,11 @@ export const USAGE = [
 
 /** The options each state takes besides `--issue`, and whether it needs them. */
 const OPTIONS: Record<WorkerState, Partial<Record<OptionName, "optional" | "required">>> = {
-  intake: { execution: "optional" },
+  intake: { execution: "optional", resume: "optional" },
   proposal: {},
   "await-approval": { kind: "optional" },
-  command: { comment: "required" },
+  // Exactly one of the two: an owner's comment, or the issue was closed.
+  command: { comment: "optional", closed: "optional" },
   approved: {},
   design: {},
   plan: {},
@@ -44,8 +47,8 @@ const OPTIONS: Record<WorkerState, Partial<Record<OptionName, "optional" | "requ
   "open-pr": {},
   escalate: { reason: "required" },
 };
-type OptionName = "execution" | "comment" | "reason" | "task" | "kind";
-const OPTION_NAMES: readonly OptionName[] = ["execution", "comment", "reason", "task", "kind"];
+type OptionName = "execution" | "comment" | "reason" | "task" | "kind" | "closed" | "resume";
+const OPTION_NAMES: readonly OptionName[] = ["execution", "comment", "reason", "task", "kind", "closed", "resume"];
 
 /** The approvals `await-approval` opens. */
 export const APPROVAL_KINDS = ["proposal", "design"] as const;
@@ -69,6 +72,10 @@ export interface WorkerArgs {
   taskId?: string;
   /** await-approval: which approval it opens; defaults to `proposal`. */
   kind?: (typeof APPROVAL_KINDS)[number];
+  /** command: the issue was closed; there is no comment (add-work-item-resume). */
+  closed?: boolean;
+  /** intake: Adopt, for an execution a `/resume` started (add-work-item-resume). */
+  resume?: boolean;
 }
 
 export type ParsedArgs = ({ ok: true } & WorkerArgs) | { ok: false; message: string };
@@ -76,7 +83,7 @@ export type ParsedArgs = ({ ok: true } & WorkerArgs) | { ok: false; message: str
 /** Reads `<state> --issue <n>` and the state's options; never throws. */
 export function parseWorkerArgs(argv: string[]): ParsedArgs {
   let positionals: string[];
-  let values: Partial<Record<"issue" | OptionName, string | undefined>>;
+  let values: Partial<Record<"issue" | Exclude<OptionName, "closed" | "resume">, string | undefined>> & { closed?: boolean; resume?: boolean };
   try {
     const parsed = parseArgs({
       args: argv,
@@ -89,6 +96,8 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
         reason: { type: "string" },
         task: { type: "string" },
         kind: { type: "string" },
+        closed: { type: "boolean" },
+        resume: { type: "boolean" },
       },
     });
     positionals = parsed.positionals;
@@ -111,7 +120,9 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
     if (values[name] !== undefined && options[name] === undefined) return { ok: false, message: `${state} takes no --${name}` };
     if (values[name] === undefined && options[name] === "required") return { ok: false, message: `${state} needs --${name}` };
   }
-  const { execution, comment, reason, task, kind } = values;
+  const { execution, comment, reason, task, kind, closed, resume } = values;
+  if (state === "command" && (comment === undefined) === (closed !== true)) return { ok: false, message: "command needs either --comment or --closed" };
+  if (resume === true && execution === undefined) return { ok: false, message: "intake --resume needs --execution" };
   if (execution !== undefined && !EXECUTION_ARN.test(execution)) return { ok: false, message: "--execution must be a Step Functions execution ARN" };
   if (comment !== undefined && (!COMMENT_ID.test(comment) || !Number.isSafeInteger(Number(comment)))) return { ok: false, message: "--comment must be a comment id" };
   if (reason !== undefined && !isEscalationReason(reason)) return { ok: false, message: `--reason must be one of ${ESCALATION_REASONS.join(", ")}` };
@@ -127,6 +138,8 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
     ...(reason === undefined ? {} : { reason }),
     ...(task === undefined ? {} : { taskId: task }),
     ...(kind === undefined ? {} : { kind }),
+    ...(closed === true ? { closed: true } : {}),
+    ...(resume === true ? { resume: true } : {}),
   };
 }
 

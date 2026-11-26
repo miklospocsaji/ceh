@@ -22,9 +22,6 @@ const HELP: Record<KnownVerb, { when: string; does: string }> = {
   help: { when: "always", does: "replies with this table" },
 };
 
-/** Interim, until add-work-item-resume lands (add-owner-commands design, "Interim replies"). */
-const NOT_YET_AVAILABLE: readonly KnownVerb[] = ["abort", "resume"];
-
 /** The `/help` reply: one table, built from the parser's verbs. */
 export function helpReply(): string {
   const rows = KNOWN_VERBS.map((verb) => `| \`/${verb}\` | ${HELP[verb].when} | ${HELP[verb].does} |`);
@@ -34,8 +31,6 @@ export function helpReply(): string {
     "| Command | When | What it does |",
     "| --- | --- | --- |",
     ...rows,
-    "",
-    `${NOT_YET_AVAILABLE.map((verb) => `\`/${verb}\``).join(", ").replace(/, ([^,]*)$/, " and $1")} are not yet available.`,
   ].join("\n");
 }
 
@@ -48,14 +43,78 @@ export function busyReply(state: string, command: Command): string {
   return `${quote(command)}\n\n\`${state}\` is running, so your \`/${command.written}\` was not applied and is not kept. Send it again when the factory asks for your approval.`;
 }
 
-export function notYetAvailableReply(command: Command): string {
-  return `${quote(command)}\n\n\`/${command.written}\` is not yet available: the factory cannot act on it yet. Nothing was done.`;
-}
+/** The states a work item stops in; `/resume` continues it from there. */
+const STOPPED: readonly string[] = ["aborted", "escalated"];
 
-/** `/approve` with nothing to approve: no work item, no open approval, or a state that awaits none. */
+/**
+ * `/approve`, `/revise` or `/question` with nothing to approve: no work item, no open approval, or
+ * a state that awaits none. A stopped work item's reply points to `/resume`.
+ */
 export function nothingAwaitsReply(workItem: WorkItemRow | undefined): string {
   if (workItem === undefined) return "Nothing awaits approval on this issue: it has no factory work item. Labelling it `factory` starts one.";
+  if (STOPPED.includes(workItem.state)) {
+    return `Nothing awaits approval: the work item \`${workItem.changeId}\` is \`${workItem.state}\`${stoppedIn(workItem)}. Reply \`/resume\` to continue it, with guidance for the next role after the verb if you like.`;
+  }
   return `Nothing awaits approval: the work item \`${workItem.changeId}\` is \`${workItem.state}\`. \`/status\` says where it stands.`;
+}
+
+/** `/revise` or `/question` during the build: the plan is being built, so only stopping it changes anything. */
+export function nothingAwaitsDuringBuildReply(command: Command, workItem: WorkItemRow): string {
+  return `${quote(command)}\n\nNothing awaits approval: the work item \`${workItem.changeId}\` is \`${workItem.state}\`, and the build follows the approved change. To change it, reply \`/abort\` to stop the build, or open a new issue that says what you want.`;
+}
+
+function stoppedIn(workItem: WorkItemRow): string {
+  return workItem.stoppedIn === null ? "" : ` (it stopped in \`${workItem.stoppedIn}\`)`;
+}
+
+/** `/abort` that stopped the work item. */
+export function abortedReply(workItem: WorkItemRow, from: string): string {
+  return `The work item \`${workItem.changeId}\` is aborted: the factory stopped it in \`${from}\`. Nothing of it is lost. Reply \`/resume\` to continue it from there, with guidance for the next role after the verb if you like.`;
+}
+
+/** The one comment on a closed issue whose work item was stopped. */
+export function issueClosedComment(workItem: WorkItemRow, from: string): string {
+  return `The issue was closed, so the factory stopped the work item \`${workItem.changeId}\` in \`${from}\`; it is \`aborted\` now. To continue it, reopen the issue and reply \`/resume\`.`;
+}
+
+/** `/abort` with nothing to stop. */
+export function nothingRunsReply(command: Command, workItem: WorkItemRow | undefined): string {
+  if (workItem === undefined) return `${quote(command)}\n\nNothing runs on this issue: it has no factory work item, so nothing was done.`;
+  const next = STOPPED.includes(workItem.state) ? " Reply `/resume` to continue it." : workItem.state === "pr-open" ? " Its pull request is open for review." : "";
+  return `${quote(command)}\n\nNothing runs: the work item \`${workItem.changeId}\` is \`${workItem.state}\`, so nothing was done.${next}`;
+}
+
+/** `/abort` or `/resume` on a local run's work item, which has no execution. */
+export function localRunReply(command: Command, workItem: WorkItemRow): string {
+  return `${quote(command)}\n\nThe work item \`${workItem.changeId}\` is a local run's: it has no execution to stop or start, so nothing was done. Local runs stop and go on with \`pnpm factory run --issue ${String(workItem.issueNumber)}\`.`;
+}
+
+/** `/resume` that started a new execution. */
+export function resumingReply(workItem: WorkItemRow, guided: boolean): string {
+  const from = workItem.stoppedIn ?? workItem.state;
+  const guidance = guided ? " The next role gets your text as guidance." : "";
+  return `The work item \`${workItem.changeId}\` resumes from \`${from}\` in a new execution.${guidance} Nothing already approved is asked for again, and no finished task is built again.`;
+}
+
+/** `/resume` while the execution runs. */
+export function resumeRunningReply(command: Command, workItem: WorkItemRow): string {
+  return `${quote(command)}\n\nThe work item \`${workItem.changeId}\` is running (\`${workItem.state}\`), so there is nothing to resume. Reply \`/abort\` first if you want to stop it.`;
+}
+
+/** `/resume` on a closed issue. */
+export function resumeClosedIssueReply(command: Command, workItem: WorkItemRow): string {
+  return `${quote(command)}\n\nThis issue is closed, so the work item \`${workItem.changeId}\` was not resumed. Reopen the issue first, then reply \`/resume\`.`;
+}
+
+/** `/resume` once the pull request is open. */
+export function resumePullRequestOpenReply(command: Command, workItem: WorkItemRow, url: string | undefined): string {
+  const link = url === undefined ? "" : `, at ${url}`;
+  return `${quote(command)}\n\nThe pull request is open for review${link}, so there is nothing to resume. The work item \`${workItem.changeId}\` is \`${workItem.state}\`.`;
+}
+
+/** `/resume` on an issue with no work item. */
+export function resumeNoWorkItemReply(command: Command): string {
+  return `${quote(command)}\n\nThis issue has no factory work item, so there is nothing to resume. Labelling it \`factory\` starts one.`;
 }
 
 /** `/approve` once the pull request is open; `url` is undefined if the forge has no open one. */
@@ -193,7 +252,9 @@ function waitsFor(state: string): string {
     case "pr-open":
       return "The factory waits for your review of the pull request.";
     case "escalated":
-      return "The factory waits for you: the work item is escalated.";
+      return "The factory waits for you: the work item is escalated. Reply `/resume` to continue it.";
+    case "aborted":
+      return "The factory waits for you: the work item is aborted. Reply `/resume` to continue it.";
     default:
       return "Nothing waits for you: the factory is working on it.";
   }

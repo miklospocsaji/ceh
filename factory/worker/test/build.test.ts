@@ -611,3 +611,33 @@ describe("factory-build", () => {
     });
   });
 });
+
+describe("factory-build: the owner's /resume guidance (add-work-item-resume)", () => {
+  const GUIDANCE = 'Treat an empty title as "Untitled"';
+
+  it("puts the build input's guidance in the session's prompt, fenced as the owner's feedback", async () => {
+    const result = await build(
+      "implementer",
+      {
+        act: (worktree) => {
+          write(worktree, SOURCE, "export const words = 1;\n");
+        },
+      },
+      input({ ownerGuidance: GUIDANCE, evidence: { reason: "green", evidence: "The spec does not say what an empty title becomes." } }),
+    );
+
+    expect(result.err.join("")).toBe("");
+    expect(result.code).toBe(BUILD_EXIT.ok);
+    const prompt = result.sessions[0]?.item.prompt ?? "";
+    expect(prompt).toMatch(/^## Owner guidance$/m);
+    expect(prompt).toContain(`untrusted-data owner-feedback\n${GUIDANCE}\n`);
+    expect(prompt).toContain("The spec does not say what an empty title becomes.");
+  });
+
+  it("refuses an empty guidance in the build input", async () => {
+    const result = await build("implementer", {}, input({ ownerGuidance: "" }));
+
+    expect(result.code).toBe(BUILD_EXIT.invalid);
+    expect(result.sessions).toEqual([]);
+  });
+});

@@ -81,7 +81,7 @@ export async function approveLocally(ctx: LocalApproveContext, issueNumber: numb
   if (workItem?.state === "awaiting-design-approval") {
     if ((await findOpenApproval(ctx.db, workItem.id)) !== undefined) await closeApproval(ctx.db, workItem.id, by, "approved");
     await ctx.forge.comment(workItem.issueNumber, `The design of \`${workItem.changeId}\` is approved. The work item is now \`plan\`.`);
-    return { kind: "approved", approval: "design", workItem: await setWorkItemState(ctx.db, workItem.id, "plan") };
+    return { kind: "approved", approval: "design", workItem: await setWorkItemState(ctx.db, workItem.id, "plan", { from: workItem.state }) };
   }
   return { kind: "nothing-awaits", workItem };
 }
@@ -114,7 +114,7 @@ export function localReviser(): Reviser {
   return async (workItem, by, db) => {
     const approval: "proposal" | "design" = workItem.state === "awaiting-design-approval" ? "design" : "proposal";
     if ((await findOpenApproval(db, workItem.id)) !== undefined) await closeApproval(db, workItem.id, by, "revise");
-    return { kind: "revised", approval, workItem: await setWorkItemState(db, workItem.id, approval === "design" ? "design" : "proposal") };
+    return { kind: "revised", approval, workItem: await setWorkItemState(db, workItem.id, approval === "design" ? "design" : "proposal", { from: workItem.state }) };
   };
 }
 

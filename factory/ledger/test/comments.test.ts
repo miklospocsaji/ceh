@@ -181,7 +181,7 @@ describe("comments: lockWorkItem", () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(waited).toBe("pending");
 
-      await setWorkItemState(first, item.id, "proposal-approved");
+      await setWorkItemState(first, item.id, "proposal-approved", { from: "awaiting-proposal-approval" });
       await first.query("COMMIT");
 
       expect((await secondLock)?.state).toBe("proposal-approved");

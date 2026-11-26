@@ -14,7 +14,7 @@ import { query as sdkQuery, type Options, type SDKMessage, type SDKResultMessage
 import { z } from "zod";
 import { DENY_LIST, RoleConfigError, writableFor, type Role, type RoleConfig } from "./config.ts";
 import { createPathGuard, createReadGuard } from "./guard.ts";
-import { renderPrompt, type OwnerFeedback, type PromptArtifact, type PromptIssue, type RetryEvidence } from "./prompt.ts";
+import { renderPrompt, type OwnerComment, type OwnerFeedback, type PromptArtifact, type PromptIssue, type RetryEvidence } from "./prompt.ts";
 
 const run = promisify(execFile);
 
@@ -79,6 +79,8 @@ export interface WorkItem {
   prompt?: string;
   /** The owner's commands for the stage, on a revision of the proposal author or the architect. */
   ownerFeedback?: OwnerFeedback;
+  /** The `/resume` text, for the first role that runs after a resume. */
+  ownerGuidance?: OwnerComment;
   /** The attempt every message of the session is recorded into; otherwise the role's open attempt. */
   attemptId?: string;
 }

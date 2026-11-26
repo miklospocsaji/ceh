@@ -10,7 +10,7 @@ import type { TokenUsage } from "./recorder.ts";
 export type AuthMode = "api-key" | "subscription";
 /** Why an attempt failed: a runner reason, a build reason, or a build task that left no outcome. */
 export type FailureReason = RoleFailureReason | "diff-check" | "red" | "green" | "no-outcome" | "no-what-changed" | "abandoned";
-export type AttemptOutcome = "succeeded" | "failed";
+export type AttemptOutcome = "succeeded" | "failed" | "aborted";
 
 export interface WorkItemRow {
   id: string;
@@ -24,6 +24,8 @@ export interface WorkItemRow {
   executionArn: string | null;
   /** How many times the build loop sent the change back to Design. */
   designFlaws: number;
+  /** The state an `aborted` or `escalated` work item stopped in; null otherwise (migration 0007). */
+  stoppedIn: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -77,12 +79,13 @@ export interface NewAttempt {
 
 export type AttemptEnd =
   | { outcome: "succeeded"; result?: unknown; gates?: unknown }
-  | { outcome: "failed"; failureReason: FailureReason; gates?: unknown };
+  | { outcome: "failed"; failureReason: FailureReason; gates?: unknown }
+  | { outcome: "aborted" };
 
 export type ApprovalState = "open" | "closed";
 export type ApprovalKind = "proposal" | "design";
 /** How a closed approval was closed: by `/approve` or by `/revise` (migration 0006). */
-export type ApprovalOutcome = "approved" | "revise";
+export type ApprovalOutcome = "approved" | "revise" | "aborted";
 /** What awaits the owner's approval: the proposal, or a `large` change's design. */
 export type Stage = "proposal" | "design";
 
@@ -203,6 +206,7 @@ interface WorkItemRecord {
   state: string;
   execution_arn: string | null;
   design_flaws: number;
+  stopped_in: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -266,7 +270,7 @@ interface MessageRecord {
   raw: unknown;
 }
 
-const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, created_at, updated_at";
+const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, stopped_in, created_at, updated_at";
 const ATTEMPT_COLUMNS =
   "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates, comment_ids";
 const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by, outcome";
@@ -282,6 +286,7 @@ function toWorkItem(row: WorkItemRecord): WorkItemRow {
     state: row.state,
     executionArn: row.execution_arn,
     designFlaws: row.design_flaws,
+    stoppedIn: row.stopped_in,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -393,14 +398,82 @@ export async function findWorkItemByChangeId(db: Db, repository: string, changeI
   return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
 }
 
-/** Moves the work item to `state` and returns it; a missing work item is an error. */
-export async function setWorkItemState(db: Db, workItemId: string, state: string): Promise<WorkItemRow> {
+/** A state update refused: the work item was not in the state its writer expected. */
+export class StateChanged extends Error {
+  override readonly name = "StateChanged";
+  readonly workItemId: string;
+  readonly expected: string;
+  /** The state found instead. */
+  readonly actual: string;
+
+  constructor(workItemId: string, expected: string, actual: string) {
+    super(`work item ${workItemId} is ${actual}, not ${expected}, so its state was not changed`);
+    this.workItemId = workItemId;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/** The states a work item stops in; `stopped_in` records where it was. */
+const STOPPED = ["aborted", "escalated"];
+
+/**
+ * Moves the work item from `from` to `state` and returns it (compare-and-set, add-work-item-resume):
+ * one statement that changes the row only while it is in `from`, so a stopped worker that writes
+ * late cannot move an aborted work item. A work item in another state rejects with StateChanged; a
+ * missing one is an error. Stopping (`aborted`, `escalated`) records the state it stopped in as
+ * `stopped_in`, kept from one stopped state to the other; any other state clears it.
+ */
+export async function setWorkItemState(db: Db, workItemId: string, state: string, expected: { from: string }): Promise<WorkItemRow> {
   const { rows } = await db.query<WorkItemRecord>(
-    `UPDATE work_items SET state = $2, updated_at = now() WHERE id = $1 RETURNING ${WORK_ITEM_COLUMNS}`,
-    [workItemId, state],
+    `UPDATE work_items SET state = $2, updated_at = now(),
+       stopped_in = CASE WHEN $2 = ANY($4::text[]) THEN (CASE WHEN state = ANY($4::text[]) THEN stopped_in ELSE state END) ELSE NULL END
+     WHERE id = $1 AND state = $3 RETURNING ${WORK_ITEM_COLUMNS}`,
+    [workItemId, state, expected.from, STOPPED],
   );
-  if (rows[0] === undefined) throw new Error(`work item ${workItemId} not found`);
-  return toWorkItem(rows[0]);
+  if (rows[0] !== undefined) return toWorkItem(rows[0]);
+  const found = await db.query<{ state: string }>("SELECT state FROM work_items WHERE id = $1", [workItemId]);
+  const actual = found.rows[0]?.state;
+  if (actual === undefined) throw new Error(`work item ${workItemId} not found`);
+  throw new StateChanged(workItemId, expected.from, actual);
+}
+
+export interface Adoption {
+  /** The state the adopting execution read. */
+  from: string;
+  /** The state its entry state runs in. */
+  to: string;
+  executionArn: string;
+  /** Whether the design-flaw count starts again, as for a resumed escalation. */
+  freshDesignFlaws: boolean;
+}
+
+/**
+ * A resumed execution takes the work item over (add-work-item-resume, Adopt): its ARN is stored,
+ * and the work item moves from `from` to `to` (compare-and-set, as `setWorkItemState`), which
+ * clears `stopped_in`.
+ */
+export async function adoptWorkItem(db: Db, workItemId: string, adoption: Adoption): Promise<WorkItemRow> {
+  const { rows } = await db.query<WorkItemRecord>(
+    `UPDATE work_items SET state = $2, execution_arn = $4, stopped_in = NULL, updated_at = now(),
+       design_flaws = CASE WHEN $5 THEN 0 ELSE design_flaws END
+     WHERE id = $1 AND state = $3 RETURNING ${WORK_ITEM_COLUMNS}`,
+    [workItemId, adoption.to, adoption.from, adoption.executionArn, adoption.freshDesignFlaws],
+  );
+  if (rows[0] !== undefined) return toWorkItem(rows[0]);
+  const found = await db.query<{ state: string }>("SELECT state FROM work_items WHERE id = $1", [workItemId]);
+  const actual = found.rows[0]?.state;
+  if (actual === undefined) throw new Error(`work item ${workItemId} not found`);
+  throw new StateChanged(workItemId, adoption.from, actual);
+}
+
+/** Closes the work item's open attempts `aborted` and returns them, oldest first. */
+export async function abortOpenAttempts(db: Db, workItemId: string): Promise<AttemptRow[]> {
+  const { rows } = await db.query<AttemptRecord>(
+    `UPDATE attempts SET ended_at = clock_timestamp(), outcome = 'aborted' WHERE work_item_id = $1 AND ended_at IS NULL RETURNING ${ATTEMPT_COLUMNS}`,
+    [workItemId],
+  );
+  return rows.map(toAttempt).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
 }
 
 /** Opens the next attempt for the work item's state, numbered from 1. */
@@ -417,8 +490,9 @@ export async function openAttempt(db: Db, attempt: NewAttempt): Promise<AttemptR
 /** Closes an open attempt, with the role's result if it succeeded; closing one twice is an error. */
 export async function closeAttempt(db: Db, attemptId: string, end: AttemptEnd): Promise<AttemptRow> {
   const failureReason = end.outcome === "failed" ? end.failureReason : null;
+  const gatesOf = end.outcome === "aborted" ? undefined : end.gates;
   const result = end.outcome === "succeeded" && end.result !== undefined ? JSON.stringify(end.result) : null;
-  const gates = end.gates === undefined ? null : JSON.stringify(end.gates);
+  const gates = gatesOf === undefined ? null : JSON.stringify(gatesOf);
   const { rows } = await db.query<AttemptRecord>(
     `UPDATE attempts SET ended_at = clock_timestamp(), outcome = $2, failure_reason = $3, result = $4::jsonb, gates = $5::jsonb
      WHERE id = $1 AND ended_at IS NULL

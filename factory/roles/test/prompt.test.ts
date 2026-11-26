@@ -101,7 +101,7 @@ describe("renderPrompt", () => {
   });
 
   it("has no input field for a transcript", () => {
-    expectTypeOf<keyof PromptInput>().toEqualTypeOf<"changeId" | "issue" | "changeFiles" | "specs" | "evidence" | "ownerFeedback">();
+    expectTypeOf<keyof PromptInput>().toEqualTypeOf<"changeId" | "issue" | "changeFiles" | "specs" | "evidence" | "ownerFeedback" | "ownerGuidance">();
 
     // A transcript smuggled past the type is still never rendered.
     const smuggled = { ...input, transcript: [{ role: "assistant", content: "TRANSCRIPT-MARKER" }] } as PromptInput;
@@ -202,5 +202,39 @@ describe("renderPrompt: the owner's feedback (add-approval-feedback)", () => {
     const output: HookJSONOutput = await guard(hookInput, "tool-use", { signal: new AbortController().signal });
     const specific = "hookSpecificOutput" in output ? output.hookSpecificOutput : undefined;
     expect(specific?.hookEventName === "PreToolUse" ? specific.permissionDecision : undefined).toBe("deny");
+  });
+});
+
+describe("the owner's /resume guidance (add-work-item-resume)", () => {
+  const GUIDANCE = 'Treat an empty title as "Untitled"';
+  const ownerFences = (fences: Fence[]) => fences.filter((fence) => fence.info === "untrusted-data owner-feedback");
+  const task: TaskPromptInput = {
+    changeId: "add-sample",
+    task: { id: "1.2", title: "Parse the titles", dependsOn: [], files: ["app/domain/src/titles.ts"], scenarios: ["Titles are parsed"], tests: ["app/domain/test/titles.test.ts"] },
+    changeFiles: [{ path: "openspec/changes/add-sample/proposal.md", content: "# Proposal\n" }],
+  };
+  const CLASSIFIER = "The spec does not say what an empty title becomes.";
+
+  it("fences a build role's guidance as the owner's feedback, next to the retry evidence", () => {
+    const prompt = renderTaskPrompt({ ...task, ownerGuidance: GUIDANCE, evidence: { reason: "green", evidence: CLASSIFIER } });
+    const { fences } = parse(prompt);
+
+    expect(prompt).toMatch(/^## Owner guidance$/m);
+    expect(prompt).toMatch(/\/resume/);
+    const owner = ownerFences(fences);
+    expect(owner.map((fence) => fence.content)).toEqual([GUIDANCE]);
+    expect(owner[0]?.before).toMatch(/the owner's feedback on the artifact/i);
+    expect(untrusted(fences).some((fence) => fence.content.includes(CLASSIFIER))).toBe(true);
+  });
+
+  it("fences a worker role's guidance the same way, and has no guidance section without it", () => {
+    const prompt = renderPrompt({ ...input, ownerGuidance: { text: `${GUIDANCE}\n\n${INJECTION}` } });
+    const { fences, outside } = parse(prompt);
+
+    expect(prompt).toMatch(/^## Owner guidance$/m);
+    expect(ownerFences(fences).map((fence) => fence.content)).toEqual([`${GUIDANCE}\n\n${INJECTION}`]);
+    expect(outside).not.toContain(INJECTION);
+    expect(renderPrompt(input)).not.toMatch(/^## Owner guidance$/m);
+    expect(renderTaskPrompt(task)).not.toMatch(/^## Owner guidance$/m);
   });
 });

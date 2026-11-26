@@ -9,6 +9,8 @@
  * Plan runs for a `small` change straight after Approved, for a `medium` one once the reviewer
  * approved its design, and for a `large` one once the owner closed its design approval. After a
  * design flaw it re-plans: attempts are counted from the flaw, and the ticked tasks stay done.
+ * After a `/resume` (add-work-item-resume), attempts closed `aborted` do not count, a resumed
+ * escalation counts from the `/resume`, and the first attempt gets the `/resume` text.
  */
 import { join } from "node:path";
 import { PlanResult } from "@ceh/factory-artifacts";
@@ -21,6 +23,7 @@ import { escalateWith } from "./escalation.ts";
 import { renderEvidence } from "./evidence.ts";
 import { commitPaths, ensureWorktree, type GitIdentity } from "./git.ts";
 import type { HandlerContext, Transition, WorkItemState } from "./handler.ts";
+import { counts, resumeGuidance, retriesSince } from "./resume.ts";
 
 /** Planner attempts per Plan, in total, before the work item escalates. */
 export const MAX_PLAN_ATTEMPTS = 3;
@@ -54,9 +57,11 @@ export async function plan(ctx: PlanContext, item: WorkItemRow): Promise<Transit
 
   // A crash can leave an attempt open; it counts as failed, and toward the limit.
   const since = await lastDesignFlawId(db, item.id);
-  const previousAttempts = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === PLAN && BigInt(attempt.id) > since);
+  const resetAt = await retriesSince(db, item.id);
+  const previousAttempts = (await listAttempts(db, item.id)).filter((attempt) => attempt.state === PLAN && BigInt(attempt.id) > since && counts(attempt, resetAt));
+  let guidance = await resumeGuidance(db, item.id);
   for (const attempt of previousAttempts.filter(isOpen)) await closeAttempt(db, attempt.id, { outcome: "failed", failureReason: "error" });
-  const workItem = item.state === PLAN ? item : await setWorkItemState(db, item.id, PLAN);
+  const workItem = item.state === PLAN ? item : await setWorkItemState(db, item.id, PLAN, { from: item.state });
 
   // tasks.md as it was before any session, so a re-plan keeps its ticked lines.
   const previous = await readIfExists(join(folder, "tasks.md"));
@@ -71,9 +76,12 @@ export async function plan(ctx: PlanContext, item: WorkItemRow): Promise<Transit
       issue: { title: issue.title, body: issue.body },
       changeFiles: await changeFiles(worktree, item.changeId),
       specs: await currentSpecs(worktree),
+      ...(guidance === undefined ? {} : { ownerGuidance: { text: guidance.text } }),
     };
 
-    const attempt = await openAttempt(db, { workItemId: item.id, state: PLAN, role: ctx.planner.name });
+    const commentIds = guidance === undefined ? [] : [guidance.commentId];
+    guidance = undefined;
+    const attempt = await openAttempt(db, { workItemId: item.id, state: PLAN, role: ctx.planner.name, commentIds });
     let result: unknown;
     try {
       result = await ctx.runRole(ctx.planner, input, evidence);
@@ -105,7 +113,7 @@ export async function plan(ctx: PlanContext, item: WorkItemRow): Promise<Transit
       message: `docs(${item.changeId}): plan the tasks\n\nWritten by the ${ctx.planner.name} role for issue #${String(item.issueNumber)}.`,
     });
     await ctx.forge.pushBranch({ worktree, branch: item.branch });
-    const advanced = await setWorkItemState(db, item.id, BUILD);
+    const advanced = await setWorkItemState(db, item.id, BUILD, { from: PLAN });
     return { kind: "advance", workItem: advanced, result, tasks: await unfinished(ctx, advanced) };
   }
 

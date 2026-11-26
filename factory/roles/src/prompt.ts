@@ -1,9 +1,10 @@
 /**
  * Builds a role's prompt from artifacts only: the work item, the change folder, the current
- * specs of the affected capabilities, on retries the failure evidence and, on a revision, the
- * owner's commands for the stage. There is no input for a transcript. Issue text is external, so
- * it is fenced and labelled as untrusted data; the owner's commands are fenced and labelled as
- * the owner's feedback on the artifact (add-approval-feedback).
+ * specs of the affected capabilities, on retries the failure evidence, on a revision the owner's
+ * commands for the stage, and after a `/resume` its text. There is no input for a transcript.
+ * Issue text is external, so it is fenced and labelled as untrusted data; the owner's commands are
+ * fenced and labelled as the owner's feedback on the artifact (add-approval-feedback,
+ * add-work-item-resume).
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,6 +37,8 @@ export interface PromptInput {
   evidence?: RetryEvidence;
   /** The owner's commands for the stage, on a revision only. */
   ownerFeedback?: OwnerFeedback;
+  /** The text of the `/resume` that started this execution, for the first role that runs in it. */
+  ownerGuidance?: OwnerComment;
 }
 
 /** One owner command as a role gets it: the text after the verb. */
@@ -81,6 +84,7 @@ export function renderPrompt(input: PromptInput): string {
   if (feedback !== undefined && feedback.revisions.length > 0) {
     sections.push(...ownerFeedbackSections(feedback), "## Revision", overlay("revision"));
   }
+  if (input.ownerGuidance !== undefined) sections.push(...ownerGuidanceSections(input.ownerGuidance.text));
   if (evidence !== undefined) {
     sections.push(
       "## Retry evidence",
@@ -108,6 +112,18 @@ export function ownerFeedbackSections(feedback: OwnerFeedback): string[] {
     ...(revisions.length === 0 ? ["None."] : revisions),
     "The owner's questions about this stage and their answers, oldest first:",
     ...(questions.length === 0 ? ["None."] : questions),
+  ];
+}
+
+/**
+ * The `/resume` text as prompt sections (add-work-item-resume): the owner stopped the work item, or
+ * it escalated, and they resumed it with this guidance. Fenced and labelled as the owner's feedback.
+ */
+export function ownerGuidanceSections(text: string): string[] {
+  return [
+    "## Owner guidance",
+    "The owner resumed this work item with `/resume` and the guidance below. It applies to this run: follow it where it answers a question or a failure, and let it land in the files you write, since later steps see only the files.",
+    ownerText(text),
   ];
 }
 
@@ -150,6 +166,8 @@ export interface TaskPromptInput {
   changeFiles: PromptArtifact[];
   /** Present only on retries. */
   evidence?: RetryEvidence;
+  /** The text of the `/resume` that started this execution, for the first build after it. */
+  ownerGuidance?: string;
 }
 
 /**
@@ -157,7 +175,7 @@ export interface TaskPromptInput {
  * The evidence of an earlier attempt comes from agent-written code, so it is fenced as untrusted.
  */
 export function renderTaskPrompt(input: TaskPromptInput): string {
-  const { changeId, task, changeFiles, evidence } = input;
+  const { changeId, task, changeFiles, evidence, ownerGuidance } = input;
   const list = (items: readonly string[]) => (items.length === 0 ? "- none" : items.map((item) => `- ${item}`).join("\n"));
   const sections = [
     `# Work item: ${changeId}, task ${task.id}`,
@@ -171,6 +189,7 @@ export function renderTaskPrompt(input: TaskPromptInput): string {
     "## Change folder",
     ...artifacts(changeFiles, "The change folder has no files."),
   ];
+  if (ownerGuidance !== undefined) sections.push(...ownerGuidanceSections(ownerGuidance));
   if (evidence !== undefined) {
     sections.push(
       "## Retry evidence",
