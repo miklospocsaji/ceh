@@ -1,6 +1,6 @@
 # 0015 Owner commands
 
-Status: accepted (2026-11-20; owner decisions of 2026-11-15, `docs/m3.5-owner-commands.md` sections 2 and 12; add-owner-commands); amended 2026-11-20 (`/revise` and `/question`, add-approval-feedback)
+Status: accepted (2026-11-20; owner decisions of 2026-11-15, `docs/m3.5-owner-commands.md` sections 2 and 12; add-owner-commands); amended 2026-11-20 (`/revise` and `/question`, add-approval-feedback) and 2026-11-26 (`/abort`, `/resume` and the closed issue, add-work-item-resume)
 
 ## Context
 
@@ -69,3 +69,18 @@ Consequences:
 - A question's answer runs inside the `command` task and gets no Step Functions retry; a crash leaves a failed attempt and the owner asks again.
 - Five revisions of a proposal could cost more than the budget; the budget check refuses the one that would go over.
 - An execution started before this deploy runs the old definition: a `/revise` to it would send it to Approved with the work item in `proposal`, which Approved refuses, and the work item escalates. Deploy with no execution paused at an approval.
+
+## Amendment 2026-11-26: `/abort`, `/resume` and the closed issue
+
+M3.5 (add-work-item-resume, ADR 0016; `docs/m3.5-owner-commands.md` sections 6, 7 and 9) replaces the last "not yet available" answers. `/help` lists every command as available.
+
+- **`/abort [reason]`** while the work item runs (any state from `intake` to `build`) stops its execution and the ECS task it runs, closes its open attempts and approval `aborted`, and makes it `aborted`, recording where it stopped. The reply says `/resume` continues it. The reason is recorded with the comment and never reaches the execution: its stop cause names the comment id only. `/abort` on an `aborted`, `escalated` or `pr-open` work item, or on an issue with none, is answered "nothing runs".
+- **`/resume [guidance]`** on a stopped work item starts a new execution that continues it (ADR 0016). It is answered "running" while the execution runs, refused on a closed issue (reopen it first), "the PR is open" once it is, and "no work item; label the issue `factory`" without one. Its text is the guidance the next role gets.
+- **The replies on a stopped work item point to `/resume`:** `/approve`, `/revise` and `/question` on an `aborted` or `escalated` work item say nothing awaits and that `/resume` continues it. During `build`, `/revise` and `/question` say nothing awaits and name `/abort` and a new issue.
+- **A closed issue is not a command.** The webhook runs `command --issue <n> --closed` for `issues.closed`, whoever closed the issue; the task aborts a running work item and posts one fixed comment, and records nothing in `comments`. `issues.reopened` starts nothing.
+- **Local work items** answer `/abort` and `/resume` with `pnpm factory run`: they have no execution.
+- The `command` task decides both under the work item's lock, as before. `/abort` holds the lock across StopExecution, GetExecutionHistory and StopTask, a few calls; `/resume` across DescribeExecution and StartExecution. Applied `/abort` and `/resume` count as owner interventions.
+
+Consequences:
+- A worker task that was stopped can still write for about 30 s; compare-and-set state updates (ADR 0003, amendment of 2026-11-26) refuse its state changes, and its attempt is closed already.
+- Closing an issue by mistake aborts its work item; reopening it and replying `/resume` continues it.

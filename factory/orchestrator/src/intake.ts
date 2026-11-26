@@ -12,6 +12,7 @@ import {
   type WorkItemRow,
 } from "@ceh/factory-ledger";
 import { deriveChangeId } from "./change-id.ts";
+import type { Entry } from "./entries.ts";
 import type { HandlerContext, Transition, WorkItemState } from "./handler.ts";
 
 /** The input of the Intake state: only the issue, since no work item exists yet. */
@@ -84,10 +85,6 @@ export interface AdoptItem {
   issueNumber: number;
   executionArn: string;
 }
-
-/** The states a resumed execution enters, as the state machine's entry Choice names them. */
-export type Entry = "proposal" | "await-approval" | "approved" | "design" | "await-design" | "plan" | "build";
-export const ENTRIES: readonly Entry[] = ["proposal", "await-approval", "approved", "design", "await-design", "plan", "build"];
 
 /**
  * - `entered`: the work item belongs to the new execution and is in the entry's state; `tasks` are

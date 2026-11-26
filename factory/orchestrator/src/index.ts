@@ -1,8 +1,10 @@
 export { CHANGE_ID_MAX_LENGTH, CHANGE_ID_VERBS, deriveChangeId } from "./change-id.ts";
 export type { IsTaken } from "./change-id.ts";
 export type { HandlerContext, Route, Transition, WorkItemState } from "./handler.ts";
-export { adopt, ENTRIES, intake, MISSING_REQUIREMENT_COMMENT } from "./intake.ts";
-export type { AdoptItem, Adoption, Entry, IntakeItem } from "./intake.ts";
+export { adopt, intake, MISSING_REQUIREMENT_COMMENT } from "./intake.ts";
+export { ENTRIES } from "./entries.ts";
+export type { Entry } from "./entries.ts";
+export type { AdoptItem, Adoption, IntakeItem } from "./intake.ts";
 export { MAX_PROPOSAL_ATTEMPTS, proposal } from "./proposal.ts";
 export type { ProposalContext } from "./proposal.ts";
 export { changeFileReader, ensureWorktree, FACTORY_GIT_IDENTITY, factoryHome, worktreePath } from "./git.ts";

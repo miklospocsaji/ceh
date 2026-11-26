@@ -3,20 +3,77 @@
  * designs, "State machine"): a pure function returning JSONata ASL, so it is unit-tested without
  * CDK or AWS.
  *
- *   Start ─▶ Intake ─▶ Proposal ─▶ AwaitApproval ─▶ ApprovalDecision ─▶ Approved ─┬─ 10 (small) ───────────────┐
- *              │ 4        │ 3                                                       └─ 0 ─▶ Design ─┬─ 0 ─────────┤
- *              ▼          ▼                                                                         └─ 11 ─▶ AwaitDesignApproval
- *            Ended    Escalated                                                                                  ▼
- *                                                                                           DesignApprovalDecision
- *   (ApprovalDecision: revise ─▶ Proposal; DesignApprovalDecision: revise ─▶ Design, approve ─▶ Plan)    ▼
- *                                         Plan (waitForTaskToken → { exitCode, changeId, tasks })
- *                                                                    ▼
- *     BuildTasks: Map over $tasks, one at a time: Step ─▶ 20 Build / 21 WaitInfra ─▶ Build ─▶ Step
- *                 Step 0: task done; 13: Fail DesignFlaw (caught into Design); 3: Fail WorkItemEscalated
- *                                                                    ▼
- *                                                       OpenPullRequest ─▶ Done
+ * Each worker state routes on its task's exit code (`WORKER_EXIT`); an arrow's number is that
+ * code, and an unnumbered arrow out of a worker state means 0. AwaitApproval and
+ * AwaitDesignApproval route on the owner's decision, `approve` or `revise`.
  *
- *   (each worker state: exit 2, or a crash after 2 retries, ─▶ Escalate ─▶ Escalated)
+ *   Start
+ *     |
+ *     v
+ *   StartChoice ---- resume: true ----> Adopt (see "A resumed execution" below)
+ *     | otherwise
+ *     v
+ *   Intake ---------------- 4 ----> Ended
+ *     | 0
+ *     v
+ *   Proposal <-------------------------------------+
+ *     | 0                                          |
+ *     v                                            |
+ *   AwaitApproval --> ApprovalDecision -- revise --+
+ *                        | approve
+ *                        v
+ *   Approved <-----------+
+ *     |  \
+ *     |   +-- 10: a small change skips Design ---------------------------+
+ *     | 0: a medium or large change                                      |
+ *     v                                                                  |
+ *   Design <---------------------------------------------------+         |
+ *     |  \                                                     |         |
+ *     |   +-- 11: large --> AwaitDesignApproval                |         |
+ *     |                       |                                |         |
+ *     |                       v                                |         |
+ *     |                     DesignApprovalDecision -- revise --+         |
+ *     | 0: medium, its        | approve                                  |
+ *     | reviewer approved     |                                          |
+ *     v                       |                                          |
+ *   Plan <--------------------+------------------------------------------+
+ *     | 0, with the change id and the unfinished task ids
+ *     v
+ *   BuildTasks: each unfinished task, one at a time:
+ *     |   Step -- 20 --------------> Build --> Step
+ *     |   Step -- 21 --> WaitInfra --> Build --> Step
+ *     |   Step -- 0: the task is done; the next task
+ *     |   Step -- 13: a design flaw --> Design (the Map catches DesignFlaw)
+ *     |   Step -- 3: escalated -------> Escalated
+ *     v every task done
+ *   OpenPullRequest -- 0 --> Done
+ *
+ * Exit codes: 0 ok; 3 the work item escalated (from Proposal, Approved, Design, Plan or a Step) -->
+ * Escalated, which fails the execution; 4 nothing to do, the run ends (Intake: a rejected or
+ * relabelled issue); 10 Approved: a `small` change skips Design; 11 Design: a `large` change's
+ * design waits for the owner; 13 Step: a design flaw; 20 Step: build next; 21 Step: build after
+ * an infrastructure failure, once WaitInfra's 60 s have passed.
+ *
+ * Failures: any worker state's exit 2 (refused input) goes to Escalate at once, and a crash (any
+ * other exit, or a task that never ran) is retried after 30 s and 90 s, then goes to Escalate. A
+ * failed waitForTaskToken task (AwaitApproval, AwaitDesignApproval, Plan, Adopt) goes to Escalate
+ * with no retry. Escalate is a worker task that marks the work item and comments; then Escalated.
+ *
+ * A resumed execution (input `{ issueNumber, resume: true }`, add-work-item-resume):
+ *
+ *   StartChoice ---- resume: true ----> Adopt (waitForTaskToken: { exitCode, entry, changeId, tasks })
+ *                                       |
+ *                                       v
+ *                                     AdoptExit -- 4: nothing to resume ---> Ended
+ *                                       | 0, by entry:
+ *                                       +-- proposal --------> Proposal
+ *                                       +-- await-approval --> AwaitApproval
+ *                                       +-- approved --------> Approved
+ *                                       +-- design ----------> Design
+ *                                       +-- await-design ----> AwaitDesignApproval
+ *                                       +-- plan ------------> Plan
+ *                                       +-- build -----------> BuildTasks, on Adopt's change id and tasks
+ *                                       +-- anything else ---> Escalate
  *
  * Every state but Build is a `factory-worker` task; Build runs the build task definition. States
  * pass only pointers: the issue number, the change id, task ids, exit codes and task tokens.
@@ -28,6 +85,7 @@
  * exit fails it with `States.TaskFailed` and the description, as a JSON string, in `Cause`. A task
  * that never ran has no exit code, and an ECS error has a plain-text cause: both count as a crash.
  */
+import { ENTRIES, type Entry } from "./entries.ts";
 import { ESCALATION_REASON, WORKER_EXIT } from "./exit-codes.ts";
 
 /** Where and how the state machine runs worker tasks. In CDK, these are tokens. */
@@ -84,6 +142,20 @@ const FAILED_EXIT_CODE = `$type(${CAUSE}) = 'string' and $substring(${CAUSE}, 0,
 
 const expr = (expression: string): string => `{% ${expression} %}`;
 const quote = (text: string): string => `'${text}'`;
+
+/** The state each of Adopt's entries goes to. */
+const ENTRY_STATES: Record<Entry, string> = {
+  proposal: "Proposal",
+  "await-approval": "AwaitApproval",
+  approved: "Approved",
+  design: "Design",
+  "await-design": "AwaitDesignApproval",
+  plan: "Plan",
+  build: "BuildTasks",
+};
+
+/** Adopt's entry, as one of the fixed words or null, so the history never holds anything else. */
+const ENTRY_OUTPUT = `$states.result.entry in [${ENTRIES.map(quote).join(", ")}] ? $states.result.entry : null`;
 
 /** The decision `/revise` resumes an approval wait with; `/approve` sends `approve`. */
 const REVISE = "revise";
@@ -241,7 +313,7 @@ export function definition(config: WorkerTaskConfig): StateMachineDefinition {
   };
 
   return {
-    Comment: "One factory work item, from Intake to the pull request (add-cloud-proposal-run, add-build-loop).",
+    Comment: "One factory work item, from Intake (or Adopt, on a resume) to the pull request (add-cloud-proposal-run, add-build-loop, add-work-item-resume).",
     QueryLanguage: "JSONata",
     StartAt: "Start",
     States: {
@@ -249,7 +321,29 @@ export function definition(config: WorkerTaskConfig): StateMachineDefinition {
         Type: "Pass",
         Assign: { issueNumber: expr("$states.input.issueNumber"), tries: 0 },
         Output: expr("{ 'issueNumber': $states.input.issueNumber }"),
-        Next: "Intake",
+        Next: "StartChoice",
+      },
+      // Labelling starts an execution; `/resume` starts one with `resume: true` (add-work-item-resume).
+      StartChoice: {
+        Type: "Choice",
+        Choices: [{ Condition: expr("$states.context.Execution.Input.resume = true"), Next: "Adopt" }],
+        Default: "Intake",
+      },
+      // Adopt answers like Plan: BuildTasks needs the change id and the unfinished task ids.
+      Adopt: tokenState([quote("intake"), quote("--issue"), ISSUE, quote("--resume"), quote("--execution"), "$states.context.Execution.Id"], {
+        // With nothing to resume, Adopt answers no change id: the variable stays a string.
+        Assign: { changeId: expr("$type($states.result.changeId) = 'string' ? $states.result.changeId : ''"), tasks: expr("[$states.result.tasks]") },
+        Output: expr(`{ 'exitCode': $states.result.exitCode, 'entry': ${ENTRY_OUTPUT} }`),
+        Next: "AdoptExit",
+      }),
+      AdoptExit: {
+        Type: "Choice",
+        Choices: [
+          { Condition: expr(`${EXIT_CODE} = ${String(WORKER_EXIT.ended)}`), Next: "Ended" },
+          ...ENTRIES.map((entry) => ({ Condition: expr(`${EXIT_CODE} = ${String(WORKER_EXIT.ok)} and $states.input.entry = ${quote(entry)}`), Next: ENTRY_STATES[entry] })),
+        ],
+        Assign: { reason: ESCALATION_REASON.failed },
+        Default: "Escalate",
       },
       ...workerState("Intake", [quote("intake"), quote("--issue"), ISSUE, quote("--execution"), "$states.context.Execution.Id"], [
         { exit: WORKER_EXIT.ok, next: "Proposal" },
@@ -315,7 +409,7 @@ export function definition(config: WorkerTaskConfig): StateMachineDefinition {
         Next: "Escalated",
       },
       Escalated: { Type: "Fail", Error: "WorkItemEscalated", Cause: "The work item is escalated and waits for the owner." },
-      Ended: { Type: "Succeed", Comment: "Intake ended the run: the issue was rejected, or has a work item from another execution." },
+      Ended: { Type: "Succeed", Comment: "Intake ended the run: the issue was rejected, or has a work item from another execution; or Adopt found nothing to resume." },
       Done: { Type: "Succeed", Comment: "The pull request is open; the work item is pr-open and waits for the owner." },
     },
   };

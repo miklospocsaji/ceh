@@ -67,16 +67,16 @@ No network change.
 
 - [x] 2.1 Failing tests against the local Postgres for migration 0007 and the compare-and-set update. Scenario: Late write after abort is refused. Also: an `aborted` attempt has no failure reason; an approval closes `aborted`; existing rows are unchanged.
 - [x] 2.2 Write `factory/ledger/migrations/0007_resume.sql` and `setWorkItemState(…, { from })`; pass the expected state from every handler.
-- [ ] 2.3 Failing CDK assertion tests, then the stack: the worker's four Step Functions actions, `ecs:StopTask` on the cluster's tasks and `FACTORY_STATE_MACHINE_ARN`. Scenario: Worker may control only its own executions.
-- [ ] 2.4 Write ADR 0016 (resuming work items), with the spike's result, and amend ADR 0003 (the M3.5 ledger) and ADR 0015 (`/abort`, `/resume`, the closed issue).
+- [x] 2.3 Failing CDK assertion tests, then the stack: the worker's four Step Functions actions, `ecs:StopTask` on the cluster's tasks and `FACTORY_STATE_MACHINE_ARN`. Scenario: Worker may control only its own executions.
+- [x] 2.4 Write ADR 0016 (resuming work items), with the spike's result, and amend ADR 0003 (the M3.5 ledger) and ADR 0015 (`/abort`, `/resume`, the closed issue).
 
 ## Step 3: State machine and Lambdas
 
-- [ ] 3.1 Failing tests for `definition()` with the ASL simulator: the start Choice, Adopt as a token task, the entry Choice into each of the seven entry states, Adopt's exit 4 to Ended, and BuildTasks taking Adopt's `changeId` and `tasks`. Scenarios:
+- [x] 3.1 Failing tests for `definition()` with the ASL simulator: the start Choice, Adopt as a token task, the entry Choice into each of the seven entry states, Adopt's exit 4 to Ended, and BuildTasks taking Adopt's `changeId` and `tasks`. Scenarios:
   - Resume during the build skips finished tasks (definition half)
   - Resume after an execution failed outside the factory (definition half)
-- [ ] 3.2 Write them in `state-machine.ts`. Amend ADR 0002.
-- [ ] 3.3 Failing webhook tests, then the route. Scenarios:
+- [x] 3.2 Write them in `state-machine.ts`. Amend ADR 0002.
+- [x] 3.3 Failing webhook tests, then the route. Scenarios:
   - Closing the issue stops the work item (webhook half: one `command --issue <n> --closed` task)
   - Reopened issue can be resumed (webhook half: `issues.reopened` starts nothing; the `/resume` does)
 

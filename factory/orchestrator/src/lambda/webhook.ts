@@ -11,6 +11,10 @@
  *   (`parseCommand`, the worker's own parser), by the owner: one RunTask of
  *   `command --issue <n> --comment <comment id>` (add-owner-commands design, "Webhook"). Only the
  *   id is passed, never the comment's text: the task reads it through the Forge. 202.
+ * - `issues.closed` on an issue of this repository, by anyone who could close it: one RunTask of
+ *   `command --issue <n> --closed` (add-work-item-resume design, "Webhook"). The task stops the
+ *   work item only if it runs, and comments once. `issues.reopened` starts nothing: the owner's
+ *   `/resume` does. 202.
  * - Anything else: 204, doing nothing, with no reply. A non-owner's command shows only in the
  *   log, with the login and the verb. Edited and deleted comments are ignored.
  */
@@ -131,10 +135,13 @@ export function createWebhookHandler(deps: WebhookDeps): (event: FunctionUrlEven
         log(`webhook: delivery ${deliveryId}: started execution ${name} for issue #${String(action.issueNumber)}`);
         return answer(202, "execution started");
       }
-      case "command": {
-        const subject = `command for issue #${String(action.issueNumber)}, comment ${String(action.commentId)}`;
+      case "command":
+      case "closed": {
+        const subject =
+          action.kind === "closed" ? `command --closed task for issue #${String(action.issueNumber)}` : `command for issue #${String(action.issueNumber)}, comment ${String(action.commentId)}`;
+        const args = action.kind === "closed" ? ["--closed"] : ["--comment", String(action.commentId)];
         try {
-          await deps.runTask(commandTask(deps.config.worker, action.issueNumber, action.commentId));
+          await deps.runTask(commandTask(deps.config.worker, action.issueNumber, args));
         } catch (error) {
           log(`webhook: delivery ${deliveryId}: starting the ${subject} failed: ${errorName(error)}`);
           return answer(502, "could not start the command");
@@ -157,6 +164,7 @@ function signatureMatches(body: Buffer, header: string | undefined, key: string)
 type Action =
   | { kind: "start"; issueNumber: number }
   | { kind: "command"; issueNumber: number; commentId: number }
+  | { kind: "closed"; issueNumber: number }
   | { kind: "ignore"; reason: string }
   | { kind: "invalid"; reason: string };
 
@@ -173,6 +181,7 @@ function route(eventName: string, payload: unknown, config: WebhookConfig): Acti
   const action = delivery["action"];
 
   if (eventName === "issues") {
+    if (action === "closed") return { kind: "closed", issueNumber };
     if (action !== "labeled") return { kind: "ignore", reason: `issues.${String(action)}` };
     if (asRecord(delivery["label"])["name"] !== LABEL) return { kind: "ignore", reason: "another label" };
     if (issue["state"] !== "open") return { kind: "ignore", reason: "a closed issue" };
@@ -202,14 +211,17 @@ function executionName(issueNumber: number, deliveryId: string): string {
   return `${prefix}${id}`.slice(0, NAME_LIMIT);
 }
 
-/** The `command` worker task for one comment: its id is the only part of the comment it carries. */
-function commandTask(worker: WorkerTaskConfig, issueNumber: number, commentId: number): RunTaskCommandInput {
+/**
+ * The `command` worker task for one comment, whose id is the only part of the comment it carries,
+ * or for a closed issue (`--closed`).
+ */
+function commandTask(worker: WorkerTaskConfig, issueNumber: number, args: string[]): RunTaskCommandInput {
   return {
     cluster: worker.cluster,
     taskDefinition: worker.taskDefinition,
     launchType: "FARGATE",
     networkConfiguration: { awsvpcConfiguration: { subnets: worker.subnets, securityGroups: [worker.securityGroup], assignPublicIp: "ENABLED" } },
-    overrides: { containerOverrides: [{ name: worker.container, command: ["command", "--issue", String(issueNumber), "--comment", String(commentId)] }] },
+    overrides: { containerOverrides: [{ name: worker.container, command: ["command", "--issue", String(issueNumber), ...args] }] },
   };
 }
 

@@ -1,6 +1,6 @@
 # 0002 Orchestration
 
-Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop), 2026-11-20 (owner commands) and 2026-11-20 (the owner's decision at an approval)
+Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop), 2026-11-20 (owner commands), 2026-11-20 (the owner's decision at an approval) and 2026-11-26 (resuming and stopping executions)
 
 ## Context
 
@@ -65,3 +65,12 @@ M3.5 (add-approval-feedback, ADR 0015 amendment of 2026-11-20) lets the owner se
 - **A revision loops in the same execution.** Proposal (Design) runs again, then a new approval wait with a new token. Approved routes on the change's `x-complexity` as the revised proposal has it.
 - **Questions are answered outside the state machine.** `/question` runs its read-only session in the `command` task and leaves the paused execution and its token untouched. It gets no Step Functions retry; a crashed answer is a failed attempt, and the owner asks again.
 - Step Functions keeps an execution on the definition it started with, so an execution paused at an approval across the deploy has no Choice: a `/revise` to it would go on to Approved, which refuses a work item in `proposal`. Deploy with no execution paused at an approval, or approve those first.
+
+## Amendment 2026-11-26: resuming and stopping executions
+
+M3.5 (add-work-item-resume, ADR 0016):
+- **A Choice at the start.** Start goes to StartChoice, which sends an execution whose input has `resume: true` (one a `/resume` started) to Adopt, and every other one to Intake as before.
+- **Adopt** is `factory-worker intake --issue <n> --resume --execution <arn>`, a `waitForTaskToken` task like Plan, since BuildTasks needs a change id and task ids, which a `.sync` task cannot return. It answers `{ exitCode, entry, changeId, tasks }` and assigns `$changeId` and `$tasks`. Its output keeps the exit code and the entry, computed as one of the seven fixed words or null, so the history never holds anything else. AdoptExit sends exit 4 to Ended, exit 0 to the entry's state (Proposal, AwaitApproval, Approved, Design, AwaitDesignApproval, Plan or BuildTasks), and anything else, or a failed Adopt, to Escalate.
+- **The worker stops and starts executions.** The `command` task stops the work item's execution for `/abort` or a closed issue, then the execution's latest open ECS task, which Step Functions leaves running for a `waitForTaskToken` state. For `/resume` it starts a new execution of this state machine (`FACTORY_STATE_MACHINE_ARN`). The worker's role allows these on this state machine, its executions and the factory cluster's tasks only.
+- **The webhook routes `issues.closed`** to `command --issue <n> --closed`, a worker task like any command's; it still has no ledger and no GitHub token.
+- Step Functions keeps an execution on the definition it started with: executions started before this deploy have no StartChoice and can only be aborted. A resumed execution always runs the latest definition.

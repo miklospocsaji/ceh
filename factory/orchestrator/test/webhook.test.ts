@@ -421,3 +421,59 @@ describe("webhook: comments that start nothing", () => {
     expect(tasks).toEqual([]);
   });
 });
+
+describe("webhook: closing and reopening an issue (add-work-item-resume)", () => {
+  const event = (action: string, issueOverrides: Record<string, unknown> = {}, login = OWNER) => ({ action, issue: issue({ state: action === "closed" ? "closed" : "open", ...issueOverrides }), repository, sender: { login } });
+  const closedTask = (): RunTaskCommandInput => ({ ...commandTask(), overrides: { containerOverrides: [{ name: CONFIG.worker.container, command: ["command", "--issue", "12", "--closed"] }] } });
+
+  it("Scenario: Closing the issue stops the work item", async () => {
+    const handle = createWebhookHandler(deps);
+
+    const response = await handle(delivery("issues", event("closed")));
+
+    // The webhook's half: one `command --closed` task, which stops a running work item.
+    expect(response.statusCode).toBe(202);
+    expect(tasks).toEqual([closedTask()]);
+    expect(executions).toEqual([]);
+    expect(logs.join("\n")).toContain("--closed");
+  });
+
+  it("starts the task whoever closed the issue: it stops only a work item that runs", async () => {
+    const handle = createWebhookHandler(deps);
+
+    expect((await handle(delivery("issues", event("closed", {}, "a-teammate")))).statusCode).toBe(202);
+    expect(tasks).toEqual([closedTask()]);
+  });
+
+  it("Scenario: Reopened issue can be resumed", async () => {
+    const handle = createWebhookHandler(deps);
+
+    // Reopening starts nothing; the owner's `/resume` that follows is a command like any other.
+    expect((await handle(delivery("issues", event("reopened")))).statusCode).toBe(204);
+    expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
+
+    expect((await handle(delivery("issue_comment", commented("/resume")))).statusCode).toBe(202);
+    expect(tasks).toEqual([commandTask()]);
+    expect(executions).toEqual([]);
+  });
+
+  it("starts nothing for a closed pull request or an issue of another repository", async () => {
+    const handle = createWebhookHandler(deps);
+
+    for (const request of [
+      delivery("issues", event("closed", { pull_request: { url: "https://api.github.com/repos/x/y/pulls/12" } })),
+      delivery("pull_request", { ...event("closed"), pull_request: issue() }),
+      delivery("issues", { ...event("closed"), repository: { full_name: "someone/else" } }),
+    ]) {
+      expect((await handle(request)).statusCode).toBe(204);
+    }
+    expect(tasks).toEqual([]);
+  });
+
+  it("answers 502 when the closed issue's task cannot be started", async () => {
+    const handle = createWebhookHandler({ ...deps, runTask: () => Promise.reject(Object.assign(new Error("x"), { name: "ThrottlingException" })) });
+
+    expect((await handle(delivery("issues", event("closed")))).statusCode).toBe(502);
+  });
+});
