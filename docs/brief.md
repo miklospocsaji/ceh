@@ -280,7 +280,7 @@ The app lives in `miklospocsaji/vocab`, with its product brief (`docs/brief.md` 
 
 ## 7. Milestones
 
-Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; M3.25 is done, M3.5 is settled.
+Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; both are done.
 
 1. **M0 Foundations**
    - Deliverables: monorepo with pnpm, strict TS, Vitest, lint; `openspec init` with project conventions filled in (`openspec/config.yaml`); `CLAUDE.md`; ADRs 0001–0005 (stack, orchestration, ledger store, OpenSpec usage and capabilities, fixture anonymisation); a basic GitHub Actions CI running the gates on every PR, including `openspec validate --all --strict`; an anonymised copy of the owner's real `vocab.db` in `app/fixtures/`, produced by a committed script; the approved OpenSpec changes for M1's `orchestration` and `roles` work.
@@ -329,7 +329,7 @@ Ten milestones, each ending in a working end-to-end path; app features enter as 
      - **Step 3: Make `ceh` target-aware.** The OpenSpec change is `add-target-repositories`; its scope is the list above under "What `ceh` needs to work on a repository it does not live in", plus capabilities left to the target (ADR 0014). The owner approves it, and a local Claude Code session builds it in `ceh` (factory roles never change the factory). The change carries the renames in code (the packages, the App slug in `cdk.json`, the resource tag); the owner renamed the GitHub App itself on GitHub (`ceh-app`).
      - **Step 4: Deploy from `ceh`.** The `infra:diff` shows new images, the renamed tag, the App slug and the new task environment, and no replacement of the ledger or any other stateful resource. Then the owner files a fresh small `vocab` issue for the exit run.
    - Exit: `ceh`, deployed from its own repository, takes that issue to a pull request opened by `ceh-app[bot]`, with every task built in vocab's build image and its gates green. `vocab`'s CI runs only the app's gates, and `ceh`'s CI only the factory's.
-6. **M3.5 Owner commands and resuming work items (settled 15 November 2026)**
+6. **M3.5 Owner commands and resuming work items (settled 15 November 2026, done 26 November 2026)**
    - Why: in M3 the factory ignores every issue comment except `/approve`, so the owner's answers and feedback never reach a proposal already written. A stopped or failed work item cannot be resumed, only refiled as a new issue (M3's #11). The owner cannot stop a work item, ask where it stands, or ask about a proposal from the issue.
    - Scope, in `docs/m3.5-owner-commands.md`: owner-only commands on a comment's first line (`/approve`, `/revise`, `/question`, `/abort`, `/resume`, `/status`, `/help`), all other comments ignored. While a proposal or design awaits approval:
      - `/revise` sends it back to its author with the comment.

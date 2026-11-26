@@ -90,7 +90,7 @@ No network change.
   - Closing the issue stops the work item
   - Reopened issue can be resumed
 - [x] 4.4 Cloud test from the spike, against the deployed stack, confirmed with the owner first. A throwaway state machine on the stack's boundary-check task definitions runs a `.sync` worker task, a `.sync` build task in a Map, and a `waitForTaskToken` worker task as Plan runs. Each execution is stopped by the abort's own stop code (`StopExecution`, then `StopTask` from the history), and the test deletes the state machine and its role afterwards. Scenario: Stopped execution stops its running task.
-- [ ] 4.5 Exit run (`docs/m3.5-owner-commands.md`, section 11). The owner files a fresh `vocab` issue whose proposal will ask an open question, and labels it `factory`. Confirm, in order:
+- [x] 4.5 Exit run (`docs/m3.5-owner-commands.md`, section 11). The owner files a fresh `vocab` issue whose proposal will ask an open question, and labels it `factory`. Confirm, in order:
   1. A `/question` about the proposal is answered with the approval still open; a `/revise` answering the open question gives a revised proposal that reflects the answer and no longer lists it.
   2. A `/revise` sent while the proposal is being rewritten gets the busy reply and changes nothing.
   3. A comment with no command, and a `/approve` from the second account, produce no reply and no task.
@@ -98,4 +98,4 @@ No network change.
   5. After `/approve`, the owner `/abort`s during Build after at least one task is done, then `/resume`s. The work item reaches a pull request opened by `ceh-app[bot]`, with no task rebuilt that was done before the abort and no second `/approve`.
 
   Record the comments' links, the reply latencies, the interventions count, cost and wall time in `design.md` under "Exit run".
-- [ ] 4.6 Run `pnpm check` and `pnpm gates coverage` with `--tests factory` and `--tests infra` for each of the three M3.5 changes. Tick M3.5 in the brief, update `CLAUDE.md` (no "cannot be resumed" note; the commands under "Cloud runs"), and archive the three changes in order: `pnpm exec openspec archive add-owner-commands --yes`, then `add-approval-feedback`, then `add-work-item-resume`.
+- [x] 4.6 Run `pnpm check` and `pnpm gates coverage` with `--tests factory` and `--tests infra` for each of the three M3.5 changes. Tick M3.5 in the brief, update `CLAUDE.md` (no "cannot be resumed" note; the commands under "Cloud runs"), and archive the three changes in order: `pnpm exec openspec archive add-owner-commands --yes`, then `add-approval-feedback`, then `add-work-item-resume`.
