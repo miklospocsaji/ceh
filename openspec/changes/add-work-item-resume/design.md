@@ -157,3 +157,28 @@ No contracts path in `ceh`; the changed types are `BuildInput.ownerGuidance` and
 - Approval of the spike's AWS writes (a throwaway state machine and two short tasks; a few cents).
 - Approval of the deploy, with no execution paused that must stay unchanged.
 - The M3.5 exit run (section 11): a fresh `vocab` issue whose proposal will ask at least one open question; a second GitHub account for the non-owner `/approve`; approval of every GitHub write; model spend of roughly $3–5 within the work item's $5.
+
+## Cloud results (task 4.3, 2026-11-26)
+
+- **Diff and deploy:** `pnpm image:build` and `pnpm infra:diff` were run and reviewed by the owner, then `pnpm infra:deploy`. The worker is at revision 13. The first worker task after the deploy was #27's Intake, which exited 0, so migration 0007 applied.
+- **Test:** `factory/orchestrator/test/resume.cloud.test.ts` filed the throwaway `vocab` issue #27, "[cloud test] Count lookups per weekday", as the owner, and drove it with `gh`. Its 4 tests passed in 889 s. The change was `add-cloud-test-count-lookups-per-weekday`, `small`, with one task. All times are UTC.
+  - **Proposal:** labelled at 20:50:39, then Intake and Proposal. The summary was posted at 20:54:35, and `/approve` at 20:54:46 was answered at 20:55:46. Plan ran from 20:56:23 to 20:57:03. The test author's build task for task 1.1 started at 20:58:00.
+  - **`/abort` (comment 7203257539), during that build:** commented at 20:58:25. The webhook started the `command` task at 20:58:28, and the reply came at 20:58:54 (+29 s), "stopped it in `build`". The execution was `ABORTED` with `factory.Aborted` at 20:58:54, and the build task reached `STOPPED`. `/status` (20:59:38, answered +33 s) gave `aborted`, 0 of 1 tasks done, 3 attempts, $0.20.
+  - **`/resume` (comment 7203289874):** commented at 21:00:25, and the reply came at 21:00:53 (+28 s), "resumes from `build`". The execution `issue-27-resume-7203289874` started at 21:00:53 with `{ issueNumber: 27, resume: true }`. It went Start, StartChoice, Adopt (24 s), AdoptExit, BuildTasks, and was building task 1.1 again by 21:02:11. Task 1.1 was unfinished, so it was rightly built again.
+  - **Closing the issue:** closed at 21:02:45. The webhook started one `command --issue 27 --closed` task at 21:02:47. The closed-issue comment came at 21:03:07 (+22 s), "in `build`; it is `aborted` now", the execution was `ABORTED` at 21:03:07, and its build task stopped.
+  - **Reopening and `/resume` (comment 7203360442):** reopened at 21:03:49. The webhook ignored `issues.reopened`: no task started and no comment was posted. `/resume` at 21:04:21 got its reply at 21:04:44 (+23 s). `issue-27-resume-7203360442` entered BuildTasks through Adopt at 21:05:12, without Intake, Proposal, AwaitApproval or Plan, and no second approval was asked for.
+- **Clean-up:** the test closed #27 at 21:05:24. That closed-issue task aborted the last execution at 21:05:55 (+31 s) and posted its comment. Its `Step` task had already exited, and no task was left running in the cluster. #27 stays closed, and its change branch is left in `vocab`.
+- **Cost:** $0.20 at the abort, from `/status`: the proposal, the plan and the first build attempt so far. The two short build attempts after each resume are not counted there. The ledger can't be read from the laptop, so the total is in the Anthropic console.
+
+## Cloud results (task 4.4, 2026-11-26)
+
+- **Test:** `factory/worker/test/stop.cloud.test.ts`. It creates a throwaway role and state machine `ceh-stop-test-ddb0eded` on the stack's boundary-check task definitions, with three cases: a `.sync` worker task, a `.sync` build task in an inline Map, and a `waitForTaskToken` worker task as Plan runs. Each task runs `node` as PID 1 with a script that logs SIGTERM and does not exit. Each execution is stopped 20 s after its task is `RUNNING`, with the abort's own sequence: DescribeExecution, StopExecution with `factory.Aborted`, the history newest first, `latestOpenTask` and `clusterOf` from the orchestrator, then StopTask. The test passed in 139 s, and the test added `@aws-sdk/client-iam` (3.1161.0) as a worker dev dependency for the role. Afterwards the role and the state machine were gone, and no task was left running.
+- **Results (UTC):** in every case `latestOpenTask` found the running task in the history, and the execution ended `ABORTED` with `factory.Aborted`.
+
+  | Case | ECS `stoppingAt` | `executionStoppedAt` | Task `STOPPED` | Stop code, reason, exit |
+  | --- | --- | --- | --- | --- |
+  | `.sync` worker task | 21:18:29.5 | +41.5 s | +64.5 s | `UserInitiated`, the abort's cause, 137 |
+  | `.sync` build task in a Map | 21:18:24.4 | +42.3 s | +65.5 s | `UserInitiated`, the abort's cause, 137 |
+  | `waitForTaskToken` worker task | 21:18:24.6 | +42.0 s | +64.9 s | `UserInitiated`, the abort's cause, 137 |
+
+  `stoppingAt` comes within about 1 s of StopExecution, so every task was `STOPPED` in about 66 s, within the scenario's two minutes. The `waitForTaskToken` task, which the spike saw left running, is now stopped by the abort's StopTask. Each `.sync` task's reason is also the abort's cause, so the abort's StopTask reached ECS before Step Functions' own one, which is harmless. As in the spike, SIGKILL comes about 30 s after SIGTERM (exit 137).

@@ -82,14 +82,14 @@ No network change.
 
 ## Step 4: Deploy and the M3.5 exit run
 
-- [ ] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show the state machine's new definition, the worker's new policy and environment, and new images, and no replacement of a stateful resource. Show it to the owner.
-- [ ] 4.2 Owner confirms, with no execution paused that must stay unchanged; `pnpm infra:deploy`. The first worker task applies migration 0007.
-- [ ] 4.3 Failing cloud tests, then run them with `pnpm test:cloud`: `/abort` and `/resume` against the deployed stack on a throwaway issue the owner agrees to. Scenarios:
+- [x] 4.1 `pnpm image:build`, then `pnpm infra:diff`. It must show the state machine's new definition, the worker's new policy and environment, and new images, and no replacement of a stateful resource. Show it to the owner.
+- [x] 4.2 Owner confirms, with no execution paused that must stay unchanged; `pnpm infra:deploy`. The first worker task applies migration 0007.
+- [x] 4.3 Failing cloud tests, then run them with `pnpm test:cloud`: `/abort` and `/resume` against the deployed stack on a throwaway issue the owner agrees to. Scenarios:
   - Abort during the build stops the execution
   - Resume starts a new execution
   - Closing the issue stops the work item
   - Reopened issue can be resumed
-- [ ] 4.4 Cloud test from the spike, against the deployed stack, confirmed with the owner first. A throwaway state machine on the stack's boundary-check task definitions runs a `.sync` worker task, a `.sync` build task in a Map, and a `waitForTaskToken` worker task as Plan runs. Each execution is stopped by the abort's own stop code (`StopExecution`, then `StopTask` from the history), and the test deletes the state machine and its role afterwards. Scenario: Stopped execution stops its running task.
+- [x] 4.4 Cloud test from the spike, against the deployed stack, confirmed with the owner first. A throwaway state machine on the stack's boundary-check task definitions runs a `.sync` worker task, a `.sync` build task in a Map, and a `waitForTaskToken` worker task as Plan runs. Each execution is stopped by the abort's own stop code (`StopExecution`, then `StopTask` from the history), and the test deletes the state machine and its role afterwards. Scenario: Stopped execution stops its running task.
 - [ ] 4.5 Exit run (`docs/m3.5-owner-commands.md`, section 11). The owner files a fresh `vocab` issue whose proposal will ask an open question, and labels it `factory`. Confirm, in order:
   1. A `/question` about the proposal is answered with the approval still open; a `/revise` answering the open question gives a revised proposal that reflects the answer and no longer lists it.
   2. A `/revise` sent while the proposal is being rewritten gets the busy reply and changes nothing.
