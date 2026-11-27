@@ -8,10 +8,12 @@
  *   ledger's secret or URL are removed from `process.env` once read, so no child process
  *   inherits them.
  * - Each connection attempt is bounded, so `runWorker`'s wait for a resuming Aurora can retry.
- * - The Forge is the factory's GitHub App (ADR 0009), and commits are its bot user's.
+ * - The Forge is the factory's GitHub App (ADR 0009), and commits are its bot user's
+ *   (`github.ts`). A `command` task whose App set-up fails still tries its fixed reply.
  * - The clone and the worktrees live in a temp home, removed at the end.
- * - Step Functions and the artifact bucket (`FACTORY_STORE_BUCKET`) are reached with the task
- *   role's credentials, in the task's region. The build task clones the repository over public
+ * - Step Functions, ECS and the artifact bucket (`FACTORY_STORE_BUCKET`) are reached with the
+ *   task role's credentials, in the task's region. A `/resume` starts an execution of the state
+ *   machine `FACTORY_STATE_MACHINE_ARN` names (add-work-item-resume). The build task clones the repository over public
  *   HTTPS with no token.
  * - Roles and prompts come from the image, resolved for the target.
  * Nothing printed contains a secret: errors from the Forge are scrubbed of tokens, and
@@ -20,14 +22,23 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { appCommitter, createInstallationTokenProvider, GitHubForge } from "@ceh/factory-forge";
+import { ECSClient, StopTaskCommand } from "@aws-sdk/client-ecs";
+import {
+  DescribeExecutionCommand,
+  GetExecutionHistoryCommand,
+  SendTaskFailureCommand,
+  SendTaskSuccessCommand,
+  SFNClient,
+  StartExecutionCommand,
+  StopExecutionCommand,
+} from "@aws-sdk/client-sfn";
 import { DATABASE_URL_VAR, LEDGER_SECRET_VAR, LedgerRecorder } from "@ceh/factory-ledger";
 import { createRunner, loadRole } from "@ceh/factory-roles";
 import { cloneUrl, type Target } from "@ceh/factory-target";
 import pg from "pg";
 import { ENV, parseWorkerArgs, USAGE, WorkerConfigError, workerConfig } from "./config.ts";
-import type { TaskTokens } from "@ceh/factory-orchestrator";
+import type { EcsTasks, ExecutionEvent, Executions, TaskTokens } from "@ceh/factory-orchestrator";
+import { connectGitHub } from "./github.ts";
 import { STORE_ENV, storeFromEnv, type ArtifactStore } from "./store.ts";
 import { runWorker, WORKER_EXIT, type WorkerRoles } from "./worker.ts";
 
@@ -36,6 +47,10 @@ const PROPOSAL_AUTHOR = "proposal-author";
 const LEDGER_CONNECT_TIMEOUT_MS = 10_000;
 /** The factory's region (brief, section 5), if the task's environment does not name one. */
 const DEFAULT_REGION = "eu-central-1";
+/** The work-item state machine a `/resume` starts, set by the stack. */
+const STATE_MACHINE_VAR = "FACTORY_STATE_MACHINE_ARN";
+/** GetExecutionHistory pages read before the abort gives up on finding the running task. */
+const HISTORY_PAGES = 5;
 
 const out = (text: string) => process.stdout.write(text);
 const err = (text: string) => process.stderr.write(text);
@@ -64,14 +79,10 @@ async function main(argv: string[]): Promise<number> {
   Reflect.deleteProperty(process.env, LEDGER_SECRET_VAR);
   Reflect.deleteProperty(process.env, ENV.taskToken);
 
-  const token = createInstallationTokenProvider({
-    appId: config.app.appId,
-    installationId: config.app.installationId,
-    privateKey: config.app.privateKey,
-    repository: config.repo,
-  });
-  const committer = await appCommitter({ slug: config.app.slug, token });
-  const forge = new GitHubForge({ owner: config.owner, repo: config.repo, token, committer });
+  // A `command` task whose set-up fails still answers the owner, or logs that it could not.
+  const github = await connectGitHub({ args, config, err });
+  if (!github.ok) return github.code;
+  const { forge, committer } = github;
 
   // A bounded connect, so a resuming Aurora is retried rather than waited on forever.
   const pool = new pg.Pool({ ...config.ledger, connectionTimeoutMillis: LEDGER_CONNECT_TIMEOUT_MS });
@@ -89,6 +100,8 @@ async function main(argv: string[]): Promise<number> {
       home,
       committer,
       taskTokens: stepFunctions(),
+      executions: executions(process.env[STATE_MACHINE_VAR]),
+      ecsTasks: ecsTasks(),
       ...(taskToken === undefined ? {} : { taskToken }),
       out,
       err,
@@ -124,6 +137,49 @@ function stepFunctions(): TaskTokens {
     },
     async fail(taskToken, error, cause) {
       await client.send(new SendTaskFailureCommand({ taskToken, error, cause }));
+    },
+  };
+}
+
+/** The work-item state machine's executions, with the task role's credentials. */
+function executions(stateMachineArn: string | undefined): Executions {
+  const client = new SFNClient({ region: process.env["AWS_REGION"] ?? DEFAULT_REGION });
+  return {
+    async describe(executionArn) {
+      const { status } = await client.send(new DescribeExecutionCommand({ executionArn }));
+      return { status: status ?? "UNKNOWN" };
+    },
+    async stop(executionArn, error, cause) {
+      await client.send(new StopExecutionCommand({ executionArn, error, cause }));
+    },
+    async history(executionArn) {
+      // Newest first; the running task is among the latest events, so a few pages are plenty.
+      const events: ExecutionEvent[] = [];
+      let nextToken: string | undefined;
+      for (let page = 0; page < HISTORY_PAGES; page += 1) {
+        const result = await client.send(new GetExecutionHistoryCommand({ executionArn, reverseOrder: true, maxResults: 100, ...(nextToken === undefined ? {} : { nextToken }) }));
+        for (const event of result.events ?? []) {
+          const output = event.taskSubmittedEventDetails?.output;
+          events.push({ type: event.type ?? "", ...(output === undefined ? {} : { taskSubmittedEventDetails: { output } }) });
+        }
+        nextToken = result.nextToken;
+        if (nextToken === undefined) break;
+      }
+      return events;
+    },
+    async start(name, input) {
+      if (stateMachineArn === undefined || stateMachineArn === "") throw new Error(`${STATE_MACHINE_VAR} is not set`);
+      await client.send(new StartExecutionCommand({ stateMachineArn, name, input }));
+    },
+  };
+}
+
+/** ECS StopTask with the task role's credentials. */
+function ecsTasks(): EcsTasks {
+  const client = new ECSClient({ region: process.env["AWS_REGION"] ?? DEFAULT_REGION });
+  return {
+    async stop(cluster, task, reason) {
+      await client.send(new StopTaskCommand({ cluster, task, reason }));
     },
   };
 }

@@ -1,7 +1,7 @@
 import type { z } from "zod";
 import { GatesResult } from "./gates-result.ts";
 import { ProposalResult } from "./proposal-result.ts";
-import { ClassificationResult, DesignResult, ImplementationResult, PlanResult, ReviewResult, TestResult } from "./role-results.ts";
+import { ClassificationResult, DesignResult, ImplementationResult, PlanResult, QuestionAnswer, ReviewResult, TestResult } from "./role-results.ts";
 
 export { Capability, Complexity, ProposalResult } from "./proposal-result.ts";
 export { GATE_CHECKS, GatesResult } from "./gates-result.ts";
@@ -13,6 +13,7 @@ export {
   DesignResult,
   ImplementationResult,
   PlanResult,
+  QuestionAnswer,
   ReviewResult,
   TestResult,
 } from "./role-results.ts";
@@ -27,4 +28,5 @@ export const resultSchemas: Readonly<Record<string, z.ZodType>> = {
   "test-result": TestResult,
   "implementation-result": ImplementationResult,
   "classification-result": ClassificationResult,
+  "question-answer": QuestionAnswer,
 };

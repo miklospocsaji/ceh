@@ -60,12 +60,12 @@ describe("work items", () => {
   it("moves a work item to a new state and bumps updated_at", async () => {
     const created = await createWorkItem(db.pool, { repository: REPOSITORY, issueNumber: 31, changeId: "add-word-export", branch: "add-word-export", state: "intake" });
 
-    const moved = await setWorkItemState(db.pool, created.id, "proposal");
+    const moved = await setWorkItemState(db.pool, created.id, "proposal", { from: "intake" });
 
     expect(moved).toMatchObject({ id: created.id, state: "proposal", createdAt: created.createdAt });
     expect(moved.updatedAt.getTime()).toBeGreaterThanOrEqual(created.updatedAt.getTime());
     expect(await findWorkItemByIssue(db.pool, REPOSITORY, 31)).toEqual(moved);
-    await expect(setWorkItemState(db.pool, "999999", "proposal")).rejects.toThrow("999999");
+    await expect(setWorkItemState(db.pool, "999999", "proposal", { from: "intake" })).rejects.toThrow("999999");
   });
 
   it("Scenario: Second work item for the same issue is refused", async () => {

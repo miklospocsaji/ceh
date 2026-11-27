@@ -30,7 +30,7 @@ export async function openPr(ctx: HandlerContext, item: WorkItemRow): Promise<Tr
       body: await renderBody(ctx, item, tasks),
     }));
   await ctx.forge.comment(item.issueNumber, `The factory opened a pull request for \`${item.changeId}\`: ${pr.url}`);
-  return { kind: "advance", workItem: await setWorkItemState(ctx.db, item.id, PR_OPEN) };
+  return { kind: "advance", workItem: await setWorkItemState(ctx.db, item.id, PR_OPEN, { from: item.state }) };
 }
 
 interface RoleCost {

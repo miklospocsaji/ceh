@@ -55,3 +55,11 @@ describe("ProposalResult", () => {
     expect(ProposalResult.safeParse({ ...valid, design: "…" }).success).toBe(false);
   });
 });
+
+describe("ProposalResult: whatChanged (add-approval-feedback)", () => {
+  it("takes an optional whatChanged string, and leaves it out when absent", () => {
+    expect(ProposalResult.safeParse({ ...valid, whatChanged: "Answered the export question: SQLite." }).success).toBe(true);
+    expect(ProposalResult.parse(valid)).not.toHaveProperty("whatChanged");
+    expect(ProposalResult.safeParse({ ...valid, whatChanged: ["a"] }).success).toBe(false);
+  });
+});

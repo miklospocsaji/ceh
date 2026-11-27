@@ -91,9 +91,10 @@ const labeled = (label = "factory", issueOverrides: Record<string, unknown> = {}
   repository,
   sender: { login: OWNER },
 });
-const commented = (body: string, login = OWNER, issueOverrides: Record<string, unknown> = {}, action = "created") => ({
+const COMMENT_ID = 2_418_096_512;
+const commented = (body: string, login = OWNER, issueOverrides: Record<string, unknown> = {}, action = "created", id: unknown = COMMENT_ID) => ({
   action,
-  comment: { body, user: { login } },
+  comment: { id, body, user: { login } },
   issue: issue(issueOverrides),
   repository,
   sender: { login },
@@ -261,23 +262,118 @@ describe("webhook: labels", () => {
   });
 });
 
-describe("webhook: /approve", () => {
+/** The RunTask input of the `command` worker task for a comment on issue 12. */
+const commandTask = (commentId = COMMENT_ID): RunTaskCommandInput => ({
+  cluster: CONFIG.worker.cluster,
+  taskDefinition: CONFIG.worker.taskDefinition,
+  launchType: "FARGATE",
+  networkConfiguration: { awsvpcConfiguration: { subnets: CONFIG.worker.subnets, securityGroups: [CONFIG.worker.securityGroup], assignPublicIp: "ENABLED" } },
+  overrides: { containerOverrides: [{ name: CONFIG.worker.container, command: ["command", "--issue", "12", "--comment", String(commentId)] }] },
+});
+
+describe("webhook: owner commands", () => {
+  it("Scenario: Owner command starts the command task", async () => {
+    const handle = createWebhookHandler(deps);
+    const body = "/status\nAnd the cost so far, in detail please.";
+
+    const response = await handle(delivery("issue_comment", commented(body)));
+
+    expect(response.statusCode).toBe(202);
+    expect(executions).toEqual([]);
+    expect(tasks).toEqual([commandTask()]);
+    // Only the comment's id: no part of its text, not even the verb.
+    const overrides = JSON.stringify(tasks[0]?.overrides);
+    for (const part of ["status", "cost so far", body]) expect(overrides).not.toContain(part);
+  });
+
   it("Scenario: Owner's approval resumes the execution", async () => {
     const handle = createWebhookHandler(deps);
 
     const response = await handle(delivery("issue_comment", commented("/approve\n\nLooks good.")));
 
+    // The webhook's half: the command task, which resumes the execution.
     expect(response.statusCode).toBe(202);
     expect(executions).toEqual([]);
-    expect(tasks).toEqual([
-      {
-        cluster: CONFIG.worker.cluster,
-        taskDefinition: CONFIG.worker.taskDefinition,
-        launchType: "FARGATE",
-        networkConfiguration: { awsvpcConfiguration: { subnets: CONFIG.worker.subnets, securityGroups: [CONFIG.worker.securityGroup], assignPublicIp: "ENABLED" } },
-        overrides: { containerOverrides: [{ name: CONFIG.worker.container, command: ["approve", "--issue", "12", "--by", OWNER] }] },
-      },
-    ]);
+    expect(tasks).toEqual([commandTask()]);
+  });
+
+  it("starts the command task for every first-line command of the owner's, known or not, for the task to answer", async () => {
+    const handle = createWebhookHandler(deps);
+
+    for (const [n, body] of ["/help", "/aprove", "/Approve", "/approve please", "/tmp/foo is missing", "/"].entries()) {
+      expect((await handle(delivery("issue_comment", commented(body, OWNER, {}, "created", 100 + n)))).statusCode, body).toBe(202);
+    }
+
+    expect(tasks).toEqual([100, 101, 102, 103, 104, 105].map((id) => commandTask(id)));
+  });
+
+  it("accepts a command with surrounding whitespace and CRLF line ends, and the owner's login in any case", async () => {
+    const handle = createWebhookHandler(deps);
+
+    expect((await handle(delivery("issue_comment", commented("  /approve \r\nThanks")))).statusCode).toBe(202);
+    expect((await handle(delivery("issue_comment", commented("/status", OWNER.toUpperCase())))).statusCode).toBe(202);
+    expect(tasks).toEqual([commandTask(), commandTask()]);
+  });
+
+  it("logs the command task it started, with the comment id and not the comment's text", async () => {
+    const handle = createWebhookHandler(deps);
+
+    await handle(delivery("issue_comment", commented("/status\nprivate note")));
+
+    expect(logs.join("\n")).toContain(String(COMMENT_ID));
+    expect(logs.join("\n")).not.toContain("private note");
+  });
+
+  it("answers 400 to an owner command whose comment has no usable id", async () => {
+    const handle = createWebhookHandler(deps);
+
+    for (const id of [null, "2418096512", 0, -4, 1.5, Number.MAX_SAFE_INTEGER + 2]) {
+      expect((await handle(delivery("issue_comment", commented("/status", OWNER, {}, "created", id)))).statusCode, String(id)).toBe(400);
+    }
+    expect(tasks).toEqual([]);
+  });
+
+  it("answers 502 when the worker task cannot be started", async () => {
+    const handle = createWebhookHandler({ ...deps, runTask: () => Promise.reject(new Error("RunTask failed: RESOURCE:ENI")) });
+
+    expect((await handle(delivery("issue_comment", commented("/approve")))).statusCode).toBe(502);
+  });
+});
+
+describe("webhook: comments that start nothing", () => {
+  it("Scenario: Comment without a command is ignored", async () => {
+    const handle = createWebhookHandler(deps);
+
+    const response = await handle(delivery("issue_comment", commented("Looks good to me, thanks.")));
+
+    expect(response.statusCode).toBe(204);
+    expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
+  });
+
+  it("Scenario: Command below the first line is ignored", async () => {
+    const handle = createWebhookHandler(deps);
+
+    for (const body of ["As discussed:\n/approve", "LGTM\r\n/approve", "\n/approve", "   \n/status"]) {
+      expect((await handle(delivery("issue_comment", commented(body)))).statusCode, JSON.stringify(body)).toBe(204);
+    }
+
+    expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
+  });
+
+  it("Scenario: Command from another user is ignored", async () => {
+    const handle = createWebhookHandler(deps);
+
+    const response = await handle(delivery("issue_comment", commented("/status", "someone-else")));
+
+    expect(response.statusCode).toBe(204);
+    expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
+    // Shown only in the Lambda's log, with the user and the verb.
+    const logged = logs.join("\n");
+    expect(logged).toContain("someone-else");
+    expect(logged).toContain("/status");
   });
 
   it("Scenario: Approval from another user is ignored", async () => {
@@ -292,23 +388,23 @@ describe("webhook: /approve", () => {
     expect(logs.join("\n")).toContain("someone-else");
   });
 
-  it("starts nothing for /approve on a pull request", async () => {
+  it("Scenario: Edited comment is ignored", async () => {
     const handle = createWebhookHandler(deps);
 
-    const response = await handle(delivery("issue_comment", commented("/approve", OWNER, { pull_request: { url: "https://api.github.com/repos/miklospocsaji/vocab/pulls/12" } })));
+    expect((await handle(delivery("issue_comment", commented("/approve", OWNER, {}, "edited")))).statusCode).toBe(204);
+    expect((await handle(delivery("issue_comment", commented("/approve", OWNER, {}, "deleted")))).statusCode).toBe(204);
 
-    expect(response.statusCode).toBe(204);
     expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
   });
 
-  it("starts nothing unless the comment's first line is /approve, or for an edited comment", async () => {
+  it("starts nothing for a command on a pull request, or in another repository", async () => {
     const handle = createWebhookHandler(deps);
+    const pullRequest = { pull_request: { url: "https://api.github.com/repos/miklospocsaji/vocab/pulls/12" } };
 
     for (const request of [
-      delivery("issue_comment", commented("LGTM\n/approve")),
-      delivery("issue_comment", commented("/approved")),
-      delivery("issue_comment", commented("/approve please")),
-      delivery("issue_comment", commented("/approve", OWNER, {}, "edited")),
+      delivery("issue_comment", commented("/approve", OWNER, pullRequest)),
+      delivery("issue_comment", commented("/status", OWNER, pullRequest)),
       delivery("issue_comment", { ...commented("/approve"), repository: { full_name: "someone/else" } }),
     ]) {
       expect((await handle(request)).statusCode).toBe(204);
@@ -317,16 +413,67 @@ describe("webhook: /approve", () => {
     expect(tasks).toEqual([]);
   });
 
-  it("accepts /approve with surrounding whitespace and CRLF line ends", async () => {
+  it("leaves labelling as it was: a labelled issue starts an execution and no task", async () => {
     const handle = createWebhookHandler(deps);
 
-    expect((await handle(delivery("issue_comment", commented("  /approve \r\nThanks")))).statusCode).toBe(202);
-    expect(tasks).toHaveLength(1);
+    expect((await handle(delivery("issues", labeled()))).statusCode).toBe(202);
+    expect(executions.map((execution) => JSON.parse(execution.input ?? "null") as unknown)).toEqual([{ issueNumber: 12 }]);
+    expect(tasks).toEqual([]);
+  });
+});
+
+describe("webhook: closing and reopening an issue (add-work-item-resume)", () => {
+  const event = (action: string, issueOverrides: Record<string, unknown> = {}, login = OWNER) => ({ action, issue: issue({ state: action === "closed" ? "closed" : "open", ...issueOverrides }), repository, sender: { login } });
+  const closedTask = (): RunTaskCommandInput => ({ ...commandTask(), overrides: { containerOverrides: [{ name: CONFIG.worker.container, command: ["command", "--issue", "12", "--closed"] }] } });
+
+  it("Scenario: Closing the issue stops the work item", async () => {
+    const handle = createWebhookHandler(deps);
+
+    const response = await handle(delivery("issues", event("closed")));
+
+    // The webhook's half: one `command --closed` task, which stops a running work item.
+    expect(response.statusCode).toBe(202);
+    expect(tasks).toEqual([closedTask()]);
+    expect(executions).toEqual([]);
+    expect(logs.join("\n")).toContain("--closed");
   });
 
-  it("answers 502 when the worker task cannot be started", async () => {
-    const handle = createWebhookHandler({ ...deps, runTask: () => Promise.reject(new Error("RunTask failed: RESOURCE:ENI")) });
+  it("starts the task whoever closed the issue: it stops only a work item that runs", async () => {
+    const handle = createWebhookHandler(deps);
 
-    expect((await handle(delivery("issue_comment", commented("/approve")))).statusCode).toBe(502);
+    expect((await handle(delivery("issues", event("closed", {}, "a-teammate")))).statusCode).toBe(202);
+    expect(tasks).toEqual([closedTask()]);
+  });
+
+  it("Scenario: Reopened issue can be resumed", async () => {
+    const handle = createWebhookHandler(deps);
+
+    // Reopening starts nothing; the owner's `/resume` that follows is a command like any other.
+    expect((await handle(delivery("issues", event("reopened")))).statusCode).toBe(204);
+    expect(tasks).toEqual([]);
+    expect(executions).toEqual([]);
+
+    expect((await handle(delivery("issue_comment", commented("/resume")))).statusCode).toBe(202);
+    expect(tasks).toEqual([commandTask()]);
+    expect(executions).toEqual([]);
+  });
+
+  it("starts nothing for a closed pull request or an issue of another repository", async () => {
+    const handle = createWebhookHandler(deps);
+
+    for (const request of [
+      delivery("issues", event("closed", { pull_request: { url: "https://api.github.com/repos/x/y/pulls/12" } })),
+      delivery("pull_request", { ...event("closed"), pull_request: issue() }),
+      delivery("issues", { ...event("closed"), repository: { full_name: "someone/else" } }),
+    ]) {
+      expect((await handle(request)).statusCode).toBe(204);
+    }
+    expect(tasks).toEqual([]);
+  });
+
+  it("answers 502 when the closed issue's task cannot be started", async () => {
+    const handle = createWebhookHandler({ ...deps, runTask: () => Promise.reject(Object.assign(new Error("x"), { name: "ThrottlingException" })) });
+
+    expect((await handle(delivery("issues", event("closed")))).statusCode).toBe(502);
   });
 });

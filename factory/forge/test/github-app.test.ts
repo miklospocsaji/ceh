@@ -79,6 +79,21 @@ const unauthorized = () =>
     headers: { "content-type": "application/json" },
   });
 
+/** What a rejected `fetch` carries: undici's "fetch failed" with the reason in `cause.code`. */
+function networkError(code: unknown, detail = "connect failed"): TypeError {
+  return new TypeError("fetch failed", { cause: Object.assign(new Error(detail), { code }) });
+}
+
+/** An injected sleep that records its waits and returns at once. */
+function fakeSleep() {
+  const waits: number[] = [];
+  const sleep = (ms: number) => {
+    waits.push(ms);
+    return Promise.resolve();
+  };
+  return { waits, sleep };
+}
+
 /** The JWT the provider sent with each token request. */
 function jwtsSent(api: FakeGitHubApi): string[] {
   return api.requests.filter((r) => r.path === TOKEN_PATH).map((r) => (r.authorization ?? "").replace(/^bearer /i, ""));
@@ -182,6 +197,117 @@ describe("createInstallationTokenProvider", () => {
     expect(api.issuedTokens).toHaveLength(0);
   });
 
+  it("Scenario: Token request is retried after a network error", async () => {
+    const api = fakeApi();
+    const { waits, sleep } = fakeSleep();
+    let failures = 1;
+    api.intercept = (request) => {
+      if (request.path === TOKEN_PATH && failures > 0) {
+        failures -= 1;
+        throw networkError("ECONNRESET");
+      }
+      return undefined;
+    };
+
+    const token = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(jwtsSent(api)).toHaveLength(2);
+    expect(api.issuedTokens).toHaveLength(1);
+    expect(token).toBe(api.issuedTokens[0]?.token);
+    expect(waits).toEqual([2000]);
+  });
+
+  it("Scenario: Token request is not retried after a refusal", async () => {
+    const api = fakeApi();
+    const { waits, sleep } = fakeSleep();
+    api.intercept = (request) => (request.path === TOKEN_PATH ? unauthorized() : undefined);
+
+    const error = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect(error).toMatchObject({ kind: "unauthorized", status: 401 });
+    expect(jwtsSent(api)).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("Scenario: Network failure names its code", async () => {
+    const api = fakeApi();
+    const { waits, sleep } = fakeSleep();
+    // The cause's message holds the request's credential, as a fetch error may: it must stay out.
+    api.intercept = (request) => {
+      if (request.path === TOKEN_PATH) throw networkError("UND_ERR_CONNECT_TIMEOUT", `Connect Timeout Error (${request.authorization ?? ""})`);
+      return undefined;
+    };
+
+    const error = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect(error).toMatchObject({ kind: "failed" });
+    expect((error as Error).message).toBe("GitHub App: requesting an installation token failed 3 times: fetch failed (UND_ERR_CONNECT_TIMEOUT)");
+    expect(jwtsSent(api)).toHaveLength(3);
+    expect(waits).toEqual([2000, 5000]);
+    expectNoSecrets(inspect(error, { depth: Infinity, showHidden: true }), jwtsSent(api));
+    expectNoSecrets(JSON.stringify(error), jwtsSent(api));
+  });
+
+  it("retries a token request answered with a 5xx", async () => {
+    const api = fakeApi();
+    const { waits, sleep } = fakeSleep();
+    let failures = 2;
+    api.intercept = (request) => {
+      if (request.path !== TOKEN_PATH || failures === 0) return undefined;
+      failures -= 1;
+      return Response.json({ message: "Server Error" }, { status: 502 });
+    };
+
+    const token = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(jwtsSent(api)).toHaveLength(3);
+    expect(token).toBe(api.issuedTokens[0]?.token);
+    expect(waits).toEqual([2000, 5000]);
+  });
+
+  it("gives up after 3 token requests answered with a 5xx", async () => {
+    const api = fakeApi();
+    const { sleep } = fakeSleep();
+    api.intercept = (request) => (request.path === TOKEN_PATH ? Response.json({ message: "Service Unavailable" }, { status: 503 }) : undefined);
+
+    const error = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect(error).toMatchObject({ kind: "failed", status: 503 });
+    expect((error as Error).message).toBe("GitHub App: requesting an installation token failed 3 times: 503 Service Unavailable");
+    expect(jwtsSent(api)).toHaveLength(3);
+  });
+
+  it("does not retry a token response without a token", async () => {
+    const api = fakeApi();
+    const { waits, sleep } = fakeSleep();
+    api.intercept = (request) => (request.path === TOKEN_PATH ? Response.json({}, { status: 201 }) : undefined);
+
+    const error = await provider(api, { sleep })().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect((error as Error).message).toMatch(/no token or expiry/);
+    expect(jwtsSent(api)).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("leaves out a cause whose code is not a plain code", async () => {
+    for (const code of ["connect timeout", "und_err_socket", 42, undefined, "ECONN\nRESET"]) {
+      const api = fakeApi();
+      const { sleep } = fakeSleep();
+      api.intercept = (request) => {
+        if (request.path === TOKEN_PATH) throw networkError(code, request.authorization ?? "");
+        return undefined;
+      };
+
+      const error = await provider(api, { sleep })().catch((e: unknown) => e);
+
+      expect((error as Error).message).toBe("GitHub App: requesting an installation token failed 3 times: fetch failed");
+    }
+  });
+
   it("never exposes the private key through inspect of the provider", () => {
     const tokens = provider(fakeApi());
 
@@ -197,6 +323,7 @@ describeForgeContract("GitHubForge with a GitHub App token provider", () => {
     defaultSha: DEFAULT_SHA,
     otherSha: "1111111111111111111111111111111111111111",
     addIssue: (i) => api.issues.set(i.number, i),
+    addComment: (c) => api.issueComments.set(c.id, { ...c, createdAt: "2026-11-16T20:00:00Z" }),
     setBranch: (branch, sha) => api.branches.set(branch, sha),
     comments: (n) => api.comments.get(n) ?? [],
     branchSha: (branch) => api.branches.get(branch),
@@ -332,6 +459,63 @@ describe("appCommitter", () => {
 
     expect(error).toBeInstanceOf(ForgeError);
     expect(error).toMatchObject({ kind: "unauthorized", status: 401 });
+    expect(inspect(error, { depth: Infinity, showHidden: true })).not.toContain(APP_TOKEN);
+  });
+
+  /** Answers each lookup with the next of `answers` (a Response, or an error to reject with), then with the bot user. */
+  function flakyUsersApi(answers: (Response | Error)[]) {
+    return usersApi(() => {
+      const next = answers.shift();
+      if (next instanceof Error) throw next;
+      return next ?? Response.json({ login: `${SLUG}[bot]`, id: BOT_ID, type: "Bot" });
+    });
+  }
+
+  it("retries the lookup after a network error", async () => {
+    const api = flakyUsersApi([networkError("ECONNRESET")]);
+    const { waits, sleep } = fakeSleep();
+
+    const committer = await appCommitter({ slug: SLUG, token: () => Promise.resolve(APP_TOKEN), fetch: api.fetch, sleep }).catch((e: unknown) => e);
+
+    expect(committer).toMatchObject({ name: `${SLUG}[bot]` });
+    expect(api.requests).toHaveLength(2);
+    expect(waits).toEqual([2000]);
+  });
+
+  it("retries the lookup answered with a 5xx", async () => {
+    const api = flakyUsersApi([Response.json({ message: "Bad Gateway" }, { status: 502 }), Response.json({ message: "Bad Gateway" }, { status: 502 })]);
+    const { waits, sleep } = fakeSleep();
+
+    const committer = await appCommitter({ slug: SLUG, fetch: api.fetch, sleep }).catch((e: unknown) => e);
+
+    expect(committer).toMatchObject({ name: `${SLUG}[bot]` });
+    expect(api.requests).toHaveLength(3);
+    expect(waits).toEqual([2000, 5000]);
+  });
+
+  it("does not retry a refused lookup", async () => {
+    const api = usersApi(() => unauthorized());
+    const { waits, sleep } = fakeSleep();
+
+    const error = await appCommitter({ slug: SLUG, token: () => Promise.resolve(APP_TOKEN), fetch: api.fetch, sleep }).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ kind: "unauthorized", status: 401 });
+    expect(api.requests).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("names the network error's code after 3 failed lookups, without the token", async () => {
+    const api = usersApi(() => {
+      throw networkError("UND_ERR_CONNECT_TIMEOUT", `token ${APP_TOKEN}`);
+    });
+    const { waits, sleep } = fakeSleep();
+
+    const error = await appCommitter({ slug: SLUG, token: () => Promise.resolve(APP_TOKEN), fetch: api.fetch, sleep }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForgeError);
+    expect((error as Error).message).toBe(`GitHub App: looking up the bot user ${SLUG}[bot] failed 3 times: fetch failed (UND_ERR_CONNECT_TIMEOUT)`);
+    expect(api.requests).toHaveLength(3);
+    expect(waits).toEqual([2000, 5000]);
     expect(inspect(error, { depth: Infinity, showHidden: true })).not.toContain(APP_TOKEN);
   });
 

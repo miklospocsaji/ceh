@@ -119,7 +119,7 @@ describe("factory stack: target", () => {
   };
 
   it("Scenario: Stack settings come from the target config", () => {
-    // The webhook accepts the target's repository and the target's owner.
+    // The webhook accepts the target's repository and only the target's owner's commands.
     const variables = (props("AWS::Lambda::Function").find((fn) => JSON.stringify(fn).includes(WEBHOOK_ENV.stateMachineArn))?.["Environment"] as { Variables: Record<string, unknown> }).Variables;
     expect(variables[WEBHOOK_ENV.repository]).toBe("miklospocsaji/vocab");
     expect(variables[WEBHOOK_ENV.owner]).toBe("miklospocsaji");
@@ -257,6 +257,8 @@ describe("factory stack: worker", () => {
       FACTORY_GITHUB_APP_INSTALLATION_ID: String(GITHUB.installationId),
       FACTORY_GITHUB_APP_SLUG: GITHUB.slug,
       FACTORY_STORE_BUCKET: { Ref: artifactBucket() },
+      // The state machine a `/resume` starts (add-work-item-resume): an ARN, not a secret.
+      FACTORY_STATE_MACHINE_ARN: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:states:${REGION}:${ACCOUNT}:stateMachine:${STATE_MACHINE_NAME}`]] },
     });
 
     // The webhook secret is the Lambda's alone (ADR 0009): neither the worker nor its roles name it.
@@ -317,7 +319,7 @@ describe("factory stack: worker", () => {
     expect(stack.resolve(stack.workerNetwork.securityGroup.securityGroupId)).toEqual({ "Fn::GetAtt": [worker, "GroupId"] });
   });
 
-  it("lets the task role only send task success and failure to this state machine's tasks, and read and write the artifact bucket", () => {
+  it("lets the task role only send task success and failure to this state machine's tasks, control its executions, stop the cluster's tasks, and read and write the artifact bucket", () => {
     const taskDefinition = taskDefinitionOf("WorkerTaskDefinitionArn");
     const taskRole = target(taskDefinition["TaskRoleArn"]);
     if (taskRole === undefined) throw new Error("the task definition has no task role");
@@ -339,8 +341,45 @@ describe("factory stack: worker", () => {
     expect(new Set(s3.flatMap((statement) => statement.Action))).toEqual(new Set(["s3:GetObject", "s3:PutObject", "s3:ListBucket"]));
     for (const action of ["s3:GetObject", "s3:PutObject"]) expect(resourcesFor(s3, action)).toEqual([bucketObjects()]);
     expect(resourcesFor(s3, "s3:ListBucket")).toEqual([{ "Fn::GetAtt": [artifactBucket(), "Arn"] }]);
-    expect(statements).toHaveLength(1 + s3.length);
+    // Besides: StartExecution, the three execution actions and StopTask (add-work-item-resume, below).
+    expect(statements).toHaveLength(1 + 3 + s3.length);
     expect(resources[taskRole]?.Properties?.["ManagedPolicyArns"]).toBeUndefined();
+  });
+
+  it("Scenario: Worker may control only its own executions", () => {
+    const taskDefinition = taskDefinitionOf("WorkerTaskDefinitionArn");
+    const taskRole = target(taskDefinition["TaskRoleArn"]) ?? "";
+    const statements = statementsOf(taskRole);
+    const arn = (rest: string) => ({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:states:${REGION}:${ACCOUNT}:${rest}`]] });
+
+    // StartExecution on the work-item state machine only.
+    expect(resourcesFor(statements, "states:StartExecution")).toEqual([arn(`stateMachine:${STATE_MACHINE_NAME}`)]);
+    // Stop, describe and read the history of that state machine's executions only.
+    for (const action of ["states:StopExecution", "states:DescribeExecution", "states:GetExecutionHistory"]) {
+      expect(resourcesFor(statements, action), action).toEqual([arn(`execution:${STATE_MACHINE_NAME}:*`)]);
+    }
+    // StopTask on the factory cluster's tasks only.
+    expect(resourcesFor(statements, "ecs:StopTask")).toEqual([
+      { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:ecs:${REGION}:${ACCOUNT}:task/`, { Ref: outputTarget("ClusterArn") }, "/*"]] },
+    ]);
+    // And no other Step Functions or ECS action, and no wildcard resource.
+    const control = statements.flatMap((statement) => statement.Action).filter((action) => action.startsWith("states:") || action.startsWith("ecs:"));
+    expect(new Set(control)).toEqual(
+      new Set(["states:SendTaskFailure", "states:SendTaskSuccess", "states:StartExecution", "states:StopExecution", "states:DescribeExecution", "states:GetExecutionHistory", "ecs:StopTask"]),
+    );
+    for (const statement of statements) expect(statement.Resource, JSON.stringify(statement.Action)).not.toContain("*");
+    // The build task's role has none of them (ADR 0011).
+    const buildRole = target(taskDefinitionOf("BuildTaskDefinitionArn")["TaskRoleArn"]) ?? "";
+    expect(statementsOf(buildRole).flatMap((statement) => statement.Action).filter((action) => action.startsWith("states:") || action.startsWith("ecs:"))).toEqual([]);
+  });
+
+  it("names the work-item state machine in FACTORY_STATE_MACHINE_ARN, for /resume", () => {
+    const environment = (workerContainer()["Environment"] as { Name: string; Value: unknown }[] | undefined) ?? [];
+    const variable = environment.find((entry) => entry.Name === "FACTORY_STATE_MACHINE_ARN");
+
+    expect(variable?.Value).toEqual({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:states:${REGION}:${ACCOUNT}:stateMachine:${STATE_MACHINE_NAME}`]] });
+    const [, machine] = only("AWS::StepFunctions::StateMachine");
+    expect(machine["StateMachineName"]).toBe(STATE_MACHINE_NAME);
   });
 
   it("lets the execution role read only the worker's parameters and the ledger secret", () => {
@@ -598,6 +637,42 @@ describe("factory stack: webhook Lambda", () => {
     for (const statement of statements) expect(statement.Resource).not.toContain("*");
     expect(JSON.stringify(resources[role]?.Properties?.["ManagedPolicyArns"] ?? [])).toContain("AWSLambdaBasicExecutionRole");
     expect((resources[role]?.Properties?.["ManagedPolicyArns"] as unknown[] | undefined) ?? []).toHaveLength(1);
+  });
+});
+
+/**
+ * The modules the webhook's bundle is built from: its entry and every module it imports for a
+ * value, followed through relative imports. Type-only imports are erased (verbatimModuleSyntax),
+ * so they put nothing in the bundle and are not followed.
+ */
+function webhookBundleImports(): { files: string[]; packages: string[] } {
+  const files = new Set<string>();
+  const packages = new Set<string>();
+  const visit = (file: string): void => {
+    if (files.has(file)) return;
+    files.add(file);
+    const source = readFileSync(file, "utf8");
+    const statements = source.match(/^(?:import|export)\s[^;]*?\sfrom\s+"[^"]+";|^import\s+"[^"]+";/gms) ?? [];
+    for (const statement of statements) {
+      if (/^(?:import|export)\s+type\s/.test(statement)) continue;
+      const specifier = /"([^"]+)";$/.exec(statement)?.[1] ?? "";
+      if (specifier.startsWith(".")) visit(join(file, "..", specifier));
+      else packages.add(specifier);
+    }
+  };
+  visit(join(REPO_ROOT, "factory/orchestrator/src/lambda/webhook.ts"));
+  return { files: [...files].map((file) => relative(REPO_ROOT, file)).sort(), packages: [...packages].sort() };
+}
+
+describe("factory stack: webhook bundle", () => {
+  it("holds the command parser and nothing that reaches the ledger or GitHub", () => {
+    const { files, packages } = webhookBundleImports();
+
+    // It decides what is a command with the worker's own parser.
+    expect(files).toContain("factory/orchestrator/src/commands/parse.ts");
+    // Only the AWS SDK clients it calls and Node's crypto: no pg, no ledger, no forge, no GitHub token.
+    expect(packages).toEqual(["@aws-sdk/client-ecs", "@aws-sdk/client-sfn", "@aws-sdk/client-ssm", "node:crypto"]);
+    expect(files.filter((file) => !file.startsWith("factory/orchestrator/src/"))).toEqual([]);
   });
 });
 

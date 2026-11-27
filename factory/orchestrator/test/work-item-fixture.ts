@@ -106,7 +106,7 @@ export function useWorkItemFixture(label: string): Fixture {
   afterEach(async () => {
     vi.unstubAllEnvs();
     rmSync(f.root, { recursive: true, force: true });
-    await f.db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks");
+    await f.db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks CASCADE");
   });
 
   return f;

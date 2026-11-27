@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-15
+goal: "M3.5, change 2 of 3: /revise sends a proposal or a large design back to its author with the
+  owner's comment, and /question gets a read-only answer while the approval stays open"
+x-complexity: large

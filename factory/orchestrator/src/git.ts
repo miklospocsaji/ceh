@@ -3,7 +3,7 @@
  * commits limited to the change folder, and pushes of the work item's branch.
  */
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -85,6 +85,46 @@ async function isWorktreeRoot(path: string): Promise<boolean> {
   if (!isDirectory) return false;
   const top = await git(path, "rev-parse", "--show-toplevel").catch(() => undefined);
   return top !== undefined && top === (await realpath(path));
+}
+
+/**
+ * Moves an existing worktree to the remote branch's head, for a revision (add-approval-feedback):
+ * the owner may have pushed edits since the factory's last commit. Leftovers of an earlier run in
+ * the change folder are dropped; the head is the version the owner read.
+ */
+export async function resetToRemoteHead(worktree: string, branch: string, changeId: string): Promise<string> {
+  await git(worktree, "fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  await git(worktree, "reset", "--hard", "--quiet", `origin/${branch}`);
+  await git(worktree, "clean", "-fdq", "--", `openspec/changes/${changeId}`);
+  return git(worktree, "rev-parse", "HEAD");
+}
+
+/** A clone of the forge's repository at a branch's head, removed by `dispose`. */
+export interface Checkout {
+  worktree: string;
+  /** The branch head the clone is at. */
+  commit: string;
+  dispose(): Promise<void>;
+}
+
+/**
+ * A fresh clone of the repository at `branch`'s head, in a new directory under `parent`, for a
+ * question session (add-approval-feedback): never the work item's worktree, so nothing a run
+ * writes is disturbed, and nothing the session sees is uncommitted.
+ */
+export async function freshCheckout(forge: { clone(directory: string): Promise<void> }, branch: string, parent: string): Promise<Checkout> {
+  await mkdir(parent, { recursive: true });
+  const dir = await mkdtemp(join(parent, "question-"));
+  const dispose = () => rm(dir, { recursive: true, force: true });
+  try {
+    const worktree = join(dir, "repo");
+    await forge.clone(worktree);
+    await git(worktree, "checkout", "--quiet", "-B", branch, `origin/${branch}`);
+    return { worktree: await realpath(worktree), commit: await git(worktree, "rev-parse", "HEAD"), dispose };
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
 }
 
 /** Commits the change folder, and nothing else, on the worktree's branch; returns the commit sha. */

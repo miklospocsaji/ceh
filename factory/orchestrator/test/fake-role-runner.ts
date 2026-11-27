@@ -33,10 +33,16 @@ export interface FakeStep {
   result?: unknown;
   /** The SDK's estimated cost of the attempt; defaults to 0.25. */
   costUsd?: number;
+  /** Awaited once the session has started (after its init message), before it writes or returns: to hold a session open. */
+  during?: () => Promise<void>;
+  /** Ends the session with this failure instead of a result, after its init message. */
+  fail?: AttemptFailed;
 }
 
 export interface FakeCall {
   role: string;
+  /** What the session was given of the role: its tools, write paths, limits and system prompt. */
+  config: Pick<Role, "tools" | "allow" | "writable" | "maxTurns" | "maxBudgetUsd" | "prompt" | "resultSchema">;
   item: WorkItem;
   evidence: RetryEvidence | undefined;
 }
@@ -52,25 +58,30 @@ export function createFakeRoleRunner(recorder: Recorder, steps: FakeStep[]): Fak
   const script = [...steps];
 
   const runRole: RunRole = async (role, item, evidence) => {
-    calls.push({ role: role.name, item: structuredClone(item), evidence });
+    const { tools, allow, writable, maxTurns, maxBudgetUsd, prompt, resultSchema } = role;
+    calls.push({ role: role.name, config: { tools, allow, writable, maxTurns, maxBudgetUsd, prompt, resultSchema }, item: structuredClone(item), evidence });
     const step = script.shift();
     if (step === undefined) throw new Error(`fake role runner: call ${String(calls.length)} has no scripted step`);
 
     const expected = API_KEY_SOURCE[role.authMode];
     const reported = step.apiKeySource ?? expected;
-    await recorder.record(item.id, role.name, init(reported));
+    await recorder.record(item.id, role.name, init(reported), item.attemptId);
     if (reported !== expected) {
       throw new AttemptFailed("auth-mode-mismatch", `role ${role.name} is configured for ${role.authMode}, but the session reported apiKeySource ${reported}`);
     }
+
+    await step.during?.();
+    if (step.fail !== undefined) throw step.fail;
 
     const folder = join(item.worktree, "openspec/changes", item.changeId);
     for (const [path, content] of Object.entries(step.files ?? {})) {
       await mkdir(dirname(join(folder, path)), { recursive: true });
       await writeFile(join(folder, path), content);
     }
-    await recorder.record(item.id, role.name, result({ input: 1000, output: 500, cacheRead: 0, cacheCreation: 0 }, step.costUsd ?? 0.25));
+    await recorder.record(item.id, role.name, result({ input: 1000, output: 500, cacheRead: 0, cacheCreation: 0 }, step.costUsd ?? 0.25), item.attemptId);
 
-    await validate(item);
+    // As the real runner: a role that writes nothing cannot have broken the change.
+    if (role.writable.length > 0) await validate(item);
     return step.result ?? validResult(item.changeId);
   };
 

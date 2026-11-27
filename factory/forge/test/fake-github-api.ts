@@ -15,6 +15,19 @@ export interface ApiIssue {
   pullRequest?: boolean;
 }
 
+/** An issue comment, keyed by its id; GitHub's comment ids are global. */
+export interface ApiComment {
+  id: number;
+  issueNumber: number;
+  author: string;
+  body: string;
+  /** ISO 8601, as GitHub returns it. */
+  createdAt: string;
+}
+
+/** Who the comments the factory posts are by. */
+export const FAKE_BOT_LOGIN = "ceh-app[bot]";
+
 export interface RecordedRequest {
   method: string;
   /** The path, decoded, without the base URL or query. */
@@ -74,6 +87,8 @@ export class FakeGitHubApi {
   readonly requests: RecordedRequest[] = [];
   readonly issues = new Map<number, ApiIssue>();
   readonly comments = new Map<number, string[]>();
+  /** Every comment, seeded or posted, by its id. */
+  readonly issueComments = new Map<number, ApiComment>();
   /** Branch name to head sha. */
   readonly branches = new Map<string, string>();
   /** Pull requests, in the order they were opened. */
@@ -83,7 +98,8 @@ export class FakeGitHubApi {
   intercept: Intercept | undefined;
 
   readonly #options: FakeGitHubApiOptions;
-  #nextCommentId = 1;
+  /** Far from the ids tests seed. */
+  #nextCommentId = 9_000_000_001;
   #nextPullNumber = 100;
 
   constructor(options: FakeGitHubApiOptions) {
@@ -154,7 +170,15 @@ export class FakeGitHubApi {
       const { body } = request.body as { body?: unknown };
       if (typeof body !== "string") return json(422, { message: "Validation Failed" });
       this.comments.set(issueNumber, [...(this.comments.get(issueNumber) ?? []), body]);
-      return json(201, { id: this.#nextCommentId++, body });
+      const id = this.#nextCommentId++;
+      this.issueComments.set(id, { id, issueNumber, author: FAKE_BOT_LOGIN, body, createdAt: new Date().toISOString() });
+      return json(201, this.#commentJson(this.issueComments.get(id) as ApiComment));
+    }
+
+    const byId = /^GET \/issues\/comments\/(\d+)$/.exec(route);
+    if (byId) {
+      const found = this.issueComments.get(Number(byId[1]));
+      return found === undefined ? notFound() : json(200, this.#commentJson(found));
     }
 
     const ref = /^GET \/git\/ref\/heads\/(.+)$/.exec(route);
@@ -202,6 +226,19 @@ export class FakeGitHubApi {
     }
 
     return notFound();
+  }
+
+  #commentJson(comment: ApiComment): Record<string, unknown> {
+    const { owner, repo } = this.#options;
+    return {
+      id: comment.id,
+      body: comment.body,
+      user: { login: comment.author, type: comment.author.endsWith("[bot]") ? "Bot" : "User" },
+      created_at: comment.createdAt,
+      updated_at: comment.createdAt,
+      html_url: `https://github.com/${owner}/${repo}/issues/${String(comment.issueNumber)}#issuecomment-${String(comment.id)}`,
+      issue_url: `https://api.github.com/repos/${owner}/${repo}/issues/${String(comment.issueNumber)}`,
+    };
   }
 
   #pullJson(pr: ApiPullRequest): Record<string, unknown> {

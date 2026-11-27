@@ -18,6 +18,8 @@ export const ProposalResult = z.strictObject({
   complexity: Complexity,
   summary: z.string().min(1),
   openQuestions: z.array(z.string()),
+  /** On a revision after the owner's `/revise`: what the revision changed (add-approval-feedback). */
+  whatChanged: z.string().optional(),
 });
 
 export type ProposalResult = z.infer<typeof ProposalResult>;

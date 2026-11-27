@@ -1,6 +1,6 @@
 # 0002 Orchestration
 
-Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task) and 2026-11-13 (the build loop)
+Status: accepted (2026-10-27); amended 2026-11-06 (every state a worker task), 2026-11-13 (the build loop), 2026-11-20 (owner commands), 2026-11-20 (the owner's decision at an approval) and 2026-11-26 (resuming and stopping executions)
 
 ## Context
 
@@ -48,3 +48,29 @@ M3 (add-build-loop) runs the work item past Proposal approval to a pull request.
 - **Failures leave the Map as errors.** A step's design flaw ends the item with `DesignFlaw`, which the Map catches into Design, so the change is designed and planned again; the worker escalates a third flaw. An escalated step ends it with `WorkItemEscalated`, caught into Escalated. A step that crashes past its retries or refuses its input ends it with `WorkerFailed` or `WorkerRefused`, caught into Escalate with that reason. Retries inside the Map count in a variable of their own, `$itemTries`, since a Map's states may not assign a variable of the outer scope.
 - **States pass only pointers:** the issue number, the change id, task ids, exit codes and task tokens. The change id names the work item's branch and store prefix and holds no artifact, so it is a pointer like the issue number.
 - After the Map, `open-pr` opens the pull request and the execution succeeds. The pull request waits for the owner; nothing in the state machine merges.
+
+## Amendment 2026-11-20: owner commands resume executions through the `command` task
+
+M3.5 (add-owner-commands, ADR 0015) replaces the `approve` worker task:
+- **The webhook starts `factory-worker command --issue <n> --comment <comment id>`** for every owner command, `/approve` included. It passes the comment's id only, and still has no ledger and no GitHub token. Its role is unchanged: start this state machine, run the worker family, pass the worker's roles, read the webhook secret.
+- **`/approve` resumes the execution from the `command` task,** with the open approval's token, as `approve` did: the approval is closed, `SendTaskSuccess` is called, and the approval is reopened if that fails. The task decides under a lock on the work item's ledger row, so two approvals at once send the token once.
+- **The state machine does not change.** An execution paused in AwaitApproval or AwaitDesignApproval names no `approve` task, so one paused across the deploy is approved through `command` afterwards.
+- The later M3.5 changes add `/revise` (a decision through the same token) and `/abort` and `/resume` (stopping and starting executions from the `command` task).
+
+## Amendment 2026-11-20: the owner's decision at an approval
+
+M3.5 (add-approval-feedback, ADR 0015 amendment of 2026-11-20) lets the owner send a proposal or a `large` design back to its author:
+- **A Choice after each approval wait.** AwaitApproval resumes with `{ "decision": "approve" }` or `{ "decision": "revise" }` from the `command` task, and keeps only `{ decision }` as its output. ApprovalDecision then routes `revise` back to Proposal and anything else to Approved; DesignApprovalDecision routes `revise` back to Design and anything else to Plan. Going back resets `tries`, so the revised state starts with its crash retries unused.
+- **The history carries the decision only.** The output is computed as one of the two fixed words, whatever else a resumed task's output holds, so the owner's comment never enters the execution; it is in the ledger.
+- **A revision loops in the same execution.** Proposal (Design) runs again, then a new approval wait with a new token. Approved routes on the change's `x-complexity` as the revised proposal has it.
+- **Questions are answered outside the state machine.** `/question` runs its read-only session in the `command` task and leaves the paused execution and its token untouched. It gets no Step Functions retry; a crashed answer is a failed attempt, and the owner asks again.
+- Step Functions keeps an execution on the definition it started with, so an execution paused at an approval across the deploy has no Choice: a `/revise` to it would go on to Approved, which refuses a work item in `proposal`. Deploy with no execution paused at an approval, or approve those first.
+
+## Amendment 2026-11-26: resuming and stopping executions
+
+M3.5 (add-work-item-resume, ADR 0016):
+- **A Choice at the start.** Start goes to StartChoice, which sends an execution whose input has `resume: true` (one a `/resume` started) to Adopt, and every other one to Intake as before.
+- **Adopt** is `factory-worker intake --issue <n> --resume --execution <arn>`, a `waitForTaskToken` task like Plan, since BuildTasks needs a change id and task ids, which a `.sync` task cannot return. It answers `{ exitCode, entry, changeId, tasks }` and assigns `$changeId` and `$tasks`. Its output keeps the exit code and the entry, computed as one of the seven fixed words or null, so the history never holds anything else. AdoptExit sends exit 4 to Ended, exit 0 to the entry's state (Proposal, AwaitApproval, Approved, Design, AwaitDesignApproval, Plan or BuildTasks), and anything else, or a failed Adopt, to Escalate.
+- **The worker stops and starts executions.** The `command` task stops the work item's execution for `/abort` or a closed issue, then the execution's latest open ECS task, which Step Functions leaves running for a `waitForTaskToken` state. For `/resume` it starts a new execution of this state machine (`FACTORY_STATE_MACHINE_ARN`). The worker's role allows these on this state machine, its executions and the factory cluster's tasks only.
+- **The webhook routes `issues.closed`** to `command --issue <n> --closed`, a worker task like any command's; it still has no ledger and no GitHub token.
+- Step Functions keeps an execution on the definition it started with: executions started before this deploy have no StartChoice and can only be aborted. A resumed execution always runs the latest definition.

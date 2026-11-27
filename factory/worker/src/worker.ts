@@ -11,22 +11,39 @@
  * - The cloud states (add-cloud-proposal-run): `intake --execution` ends with exit 4 for an
  *   issue whose work item belongs to another execution. `await-approval` stores the task token
  *   and posts the summary; any error in it fails the paused task with SendTaskFailure, since
- *   Step Functions does not watch that task. `approve` resumes the execution, and any failure in
- *   it is said on the issue, so the owner can repeat it. `approved` records it and routes on the
+ *   Step Functions does not watch that task. `approved` records the approval and routes on the
  *   complexity, and `escalate` marks the work item after an infrastructure failure.
+ * - `command --issue <n> --comment <id>` (add-owner-commands): one owner command, which the
+ *   webhook starts with the comment's id only. The handler reads the comment, checks its author and
+ *   issue (exit 2 if either is wrong), decides it by the work item's state and replies once; an
+ *   `/approve` resumes the execution with the approval's token. It exits 0 whatever the command's
+ *   outcome, and 1 when resuming failed (the reply says so) or anything else failed, after posting
+ *   a fixed reply, so the owner is never left without an answer.
  * - The states after Proposal (add-build-loop): `design`, `plan` (a waitForTaskToken task that
  *   resumes the execution with the change id and the unfinished task ids), `step --task <id>`,
  *   which prepares the task's next build in the artifact store, and `open-pr`. Each clones afresh.
+ * - Resuming (add-work-item-resume): `command` applies `/abort` and `/resume` with the Step
+ *   Functions and ECS clients, and `command --closed` stops a running work item whose issue was
+ *   closed (exit 0 either way; a failed StopTask is logged). `intake --resume --execution <arn>` is
+ *   Adopt, a waitForTaskToken task that resumes the execution with `{ exitCode, entry, changeId,
+ *   tasks }`: exit 0 and the entry state, or exit 4 with nothing to resume.
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ForgeError, type Forge } from "@ceh/factory-forge";
 import { findWorkItemByIssue, migrate, waitForLedger, type WorkItemRow } from "@ceh/factory-ledger";
 import {
+  adopt,
   approve,
   approved,
   awaitApproval,
   changeFileReader,
+  cloudReviser,
+  CommandFailed,
+  commandFailedReply,
+  handleCommand,
+  handleIssueClosed,
+  InvalidCommand,
   design,
   ensureWorktree,
   escalateWorkItem,
@@ -38,6 +55,8 @@ import {
   step,
   WORKER_EXIT,
   type ArtifactStore,
+  type EcsTasks,
+  type Executions,
   type GitIdentity,
   type StepContext,
   type StepResult,
@@ -55,13 +74,11 @@ export { WORKER_EXIT } from "@ceh/factory-orchestrator";
 export const AWAIT_APPROVAL_FAILURE = { error: "factory.AwaitApprovalFailed", cause: "The await-approval worker task failed; see its log." } as const;
 /** What Plan reports with SendTaskFailure: fixed text, never an error's message. */
 export const PLAN_FAILURE = { error: "factory.PlanFailed", cause: "The plan worker task failed; see its log." } as const;
+/** What Adopt reports with SendTaskFailure: fixed text, never an error's message. */
+export const ADOPT_FAILURE = { error: "factory.AdoptFailed", cause: "The intake --resume worker task failed; see its log." } as const;
 
 /** The states the state machine runs as waitForTaskToken tasks, and what they report on failure. */
 const TOKEN_STATES: Partial<Record<WorkerState, { error: string; cause: string }>> = { "await-approval": AWAIT_APPROVAL_FAILURE, plan: PLAN_FAILURE };
-
-/** What a failed `approve` says on the issue: fixed text, so no error's message reaches GitHub. */
-export const APPROVE_FAILED_COMMENT =
-  "Your `/approve` did not go through: the factory failed while handling it, and the work item still awaits your approval. Reply `/approve` again to retry.";
 
 export type WorkerIdentity = GitIdentity;
 
@@ -98,6 +115,10 @@ export interface WorkerDeps {
   taskTokens?: TaskTokens;
   /** The task token of AwaitApproval or Plan, from FACTORY_TASK_TOKEN. */
   taskToken?: string;
+  /** The state machine's executions, for `/abort`, `/resume` and a closed issue. */
+  executions?: Executions;
+  /** ECS, for stopping the task a stopped execution leaves running. */
+  ecsTasks?: EcsTasks;
   out: (text: string) => void;
   err: (text: string) => void;
 }
@@ -111,7 +132,7 @@ export async function runWorker(argv: string[], deps: WorkerDeps): Promise<numbe
     deps.err(`factory-worker: ${args.message}\n\n${USAGE}`);
     return WORKER_EXIT.invalid;
   }
-  const failure = TOKEN_STATES[args.state];
+  const failure = args.state === "intake" && args.resume === true ? ADOPT_FAILURE : TOKEN_STATES[args.state];
   const taskToken = failure === undefined ? undefined : deps.taskToken;
   if (failure !== undefined && (taskToken === undefined || taskToken === "")) {
     deps.err(`factory-worker: ${args.state} needs the task token in ${ENV.taskToken}\n`);
@@ -128,7 +149,7 @@ export async function runWorker(argv: string[], deps: WorkerDeps): Promise<numbe
     await migrate(deps.db);
     code = await runState(args, deps, token);
   } catch (error) {
-    if (error instanceof InvalidInput || error instanceof NotApplicable) {
+    if (error instanceof InvalidInput || error instanceof NotApplicable || error instanceof InvalidCommand) {
       deps.err(`factory-worker: ${error.message}\n`);
       code = WORKER_EXIT.invalid;
     } else {
@@ -165,6 +186,8 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
   const issue = `issue #${String(issueNumber)}`;
   switch (state) {
     case "intake":
+      if (args.resume === true) return runAdopt(args, deps, token);
+      return report(state, issueNumber, await runHandler(args, deps), deps);
     case "proposal":
       return report(state, issueNumber, await runHandler(args, deps), deps);
     case "await-approval": {
@@ -174,36 +197,8 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       deps.out(`factory-worker: await-approval for ${issue}: work item ${workItem.changeId} awaits the owner's ${kind} approval\n`);
       return WORKER_EXIT.ok;
     }
-    case "approve": {
-      let outcome;
-      try {
-        outcome = await approve({ db, forge, target, taskTokens: requireTaskTokens(deps) }, issueNumber, args.by ?? "");
-      } catch (error) {
-        // M2's exit run: a failed approve left the owner with no answer. Fixed text only.
-        await forge.comment(issueNumber, APPROVE_FAILED_COMMENT).catch((commentError: unknown) => {
-          deps.err(`factory-worker: approve for ${issue}: commenting on the failure failed: ${commentError instanceof Error ? commentError.message : String(commentError)}\n`);
-        });
-        throw error;
-      }
-      switch (outcome.kind) {
-        case "resumed":
-          if (outcome.commentError !== undefined) {
-            const message = outcome.commentError instanceof Error ? outcome.commentError.message : "unknown error";
-            deps.err(`factory-worker: approve for ${issue}: the confirmation comment failed: ${message}\n`);
-          }
-          deps.out(`factory-worker: approve for ${issue}: the ${outcome.approval} approval of work item ${outcome.workItem.changeId} resumed the execution\n`);
-          return WORKER_EXIT.ok;
-        case "nothing-awaits":
-          deps.out(`factory-worker: approve for ${issue}: nothing awaits approval\n`);
-          return WORKER_EXIT.ok;
-        case "resume-failed": {
-          const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-          deps.err(`factory-worker: approve for ${issue}: resuming work item ${outcome.workItem.changeId} failed: ${message}\n`);
-          return WORKER_EXIT.error;
-        }
-      }
-      break;
-    }
+    case "command":
+      return runCommand(args, deps);
     case "approved": {
       const transition = await approved({ db, forge, target, readChangeFile: (item, path) => readChangeFile(item, path, deps) }, await requireWorkItem(deps, issueNumber));
       const code = report(state, issueNumber, transition, deps);
@@ -234,6 +229,91 @@ async function runState(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | u
       return WORKER_EXIT.ok;
     }
   }
+}
+
+/**
+ * Adopt, as a waitForTaskToken task: the execution resumes with `{ exitCode, entry, changeId,
+ * tasks }`, exit 0 with the entry state, or exit 4 (and nulls) with nothing to resume. Any error is
+ * reported with SendTaskFailure by runWorker.
+ */
+async function runAdopt(args: WorkerArgs, deps: WorkerDeps, token: TaskToken | undefined): Promise<number> {
+  if (token === undefined) throw new InvalidInput(`intake --resume needs the task token in ${ENV.taskToken}`);
+  if (args.executionArn === undefined) throw new InvalidInput("intake --resume needs --execution");
+  const issue = `issue #${String(args.issueNumber)}`;
+  const adoption = await adopt({ db: deps.db, forge: deps.forge, target: deps.target }, { issueNumber: args.issueNumber, executionArn: args.executionArn });
+  const output =
+    adoption.kind === "entered"
+      ? { exitCode: WORKER_EXIT.ok, entry: adoption.entry, changeId: adoption.workItem.changeId, tasks: adoption.tasks }
+      : { exitCode: WORKER_EXIT.ended, entry: null, changeId: null, tasks: [] };
+  await requireTaskTokens(deps).succeed(token.value, JSON.stringify(output));
+  token.resumed = true;
+  if (adoption.kind === "entered") {
+    deps.out(`factory-worker: intake --resume for ${issue}: work item ${adoption.workItem.changeId} enters ${adoption.entry} (${adoption.workItem.state})\n`);
+    return WORKER_EXIT.ok;
+  }
+  deps.out(`factory-worker: intake --resume for ${issue}: nothing to resume: ${adoption.reason}\n`);
+  return WORKER_EXIT.ended;
+}
+
+/** The issue was closed: a running work item is stopped, with one comment. Exits 0 either way. */
+async function runClosed(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
+  const { db, forge, target, executions, ecsTasks } = deps;
+  const subject = `command for issue #${String(args.issueNumber)}, closed`;
+  const outcome = await handleIssueClosed({ db, forge, target, ...aws({ executions, ecsTasks }) }, args.issueNumber);
+  if (outcome.stopTaskError !== undefined) deps.err(`factory-worker: ${subject}: StopTask failed, and the abort went on: ${messageOf(outcome.stopTaskError)}\n`);
+  const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId}`;
+  deps.out(`factory-worker: ${subject}: ${outcome.outcome === "aborted" ? `${workItem} aborted` : `nothing runs (${workItem})`}\n`);
+  return WORKER_EXIT.ok;
+}
+
+/** The AWS clients the handler takes, without the ones that are not configured. */
+function aws(clients: { executions: Executions | undefined; ecsTasks: EcsTasks | undefined }): { executions?: Executions; ecsTasks?: EcsTasks } {
+  return { ...(clients.executions === undefined ? {} : { executions: clients.executions }), ...(clients.ecsTasks === undefined ? {} : { ecsTasks: clients.ecsTasks }) };
+}
+
+/** One owner command; see the module comment for its exit codes. */
+async function runCommand(args: WorkerArgs, deps: WorkerDeps): Promise<number> {
+  const { issueNumber, commentId } = args;
+  if (args.closed === true) return runClosed(args, deps);
+  if (commentId === undefined) throw new InvalidInput("command needs --comment");
+  const { db, forge, target } = deps;
+  const subject = `command for issue #${String(issueNumber)}, comment ${String(commentId)}`;
+  let outcome;
+  try {
+    const ctx = { db, forge, target, ...aws({ executions: deps.executions, ecsTasks: deps.ecsTasks }) };
+    outcome = await handleCommand(
+      {
+        ...ctx,
+        approve: (workItem, by, tx) => approve({ db: tx, forge, target, taskTokens: requireTaskTokens(deps) }, workItem, by),
+        revise: (workItem, by, tx) => cloudReviser({ ...ctx, taskTokens: requireTaskTokens(deps) })(workItem, by, tx),
+        question: { runRole: deps.runRole, proposalAuthor: deps.role, architect: deps.roles.architect, home: deps.home },
+      },
+      issueNumber,
+      commentId,
+    );
+  } catch (error) {
+    if (error instanceof InvalidCommand) throw error;
+    // Fixed text only: no error's message reaches GitHub.
+    const written = error instanceof CommandFailed ? error.command.written : undefined;
+    await forge.comment(issueNumber, commandFailedReply(written)).catch((commentError: unknown) => {
+      deps.err(`factory-worker: ${subject}: replying to the failure failed: ${messageOf(commentError)}\n`);
+    });
+    throw error;
+  }
+  const command = `/${outcome.command.written}`;
+  const workItem = outcome.workItem === undefined ? "no work item" : `work item ${outcome.workItem.changeId} in ${outcome.workItem.state}`;
+  if (outcome.commentError !== undefined) deps.err(`factory-worker: ${subject}: the confirmation comment failed: ${messageOf(outcome.commentError)}\n`);
+  if (outcome.stopTaskError !== undefined) deps.err(`factory-worker: ${subject}: StopTask failed, and the abort went on: ${messageOf(outcome.stopTaskError)}\n`);
+  if (outcome.error !== undefined) {
+    deps.err(`factory-worker: ${subject}: ${command} did not go through for ${workItem}: ${messageOf(outcome.error)}\n`);
+    return WORKER_EXIT.error;
+  }
+  deps.out(`factory-worker: ${subject}: ${command} ${outcome.outcome} (${workItem})\n`);
+  return WORKER_EXIT.ok;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function committer(deps: WorkerDeps): { committer?: WorkerIdentity } {

@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-15
+goal: "M3.5, change 1 of 3: owner-only first-line commands on an issue reach a command worker task
+  that records them and replies once; /approve moves onto it, /status and /help answer"
+x-complexity: large

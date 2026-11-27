@@ -9,8 +9,8 @@ import type { TokenUsage } from "./recorder.ts";
 
 export type AuthMode = "api-key" | "subscription";
 /** Why an attempt failed: a runner reason, a build reason, or a build task that left no outcome. */
-export type FailureReason = RoleFailureReason | "diff-check" | "red" | "green" | "no-outcome";
-export type AttemptOutcome = "succeeded" | "failed";
+export type FailureReason = RoleFailureReason | "diff-check" | "red" | "green" | "no-outcome" | "no-what-changed" | "abandoned";
+export type AttemptOutcome = "succeeded" | "failed" | "aborted";
 
 export interface WorkItemRow {
   id: string;
@@ -24,6 +24,8 @@ export interface WorkItemRow {
   executionArn: string | null;
   /** How many times the build loop sent the change back to Design. */
   designFlaws: number;
+  /** The state an `aborted` or `escalated` work item stopped in; null otherwise (migration 0007). */
+  stoppedIn: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +63,8 @@ export interface AttemptRow {
   classification: unknown;
   /** The gates result of a build attempt. */
   gates: unknown;
+  /** The owner commands (`comments.id`) the role was given, oldest first; empty for most attempts. */
+  commentIds: string[];
 }
 
 export interface NewAttempt {
@@ -69,14 +73,24 @@ export interface NewAttempt {
   role: string;
   taskId?: string;
   storePrefix?: string;
+  /** The owner commands (`comments.id`) the role is given; defaults to none. */
+  commentIds?: readonly string[];
 }
 
 export type AttemptEnd =
   | { outcome: "succeeded"; result?: unknown; gates?: unknown }
-  | { outcome: "failed"; failureReason: FailureReason; gates?: unknown };
+  | { outcome: "failed"; failureReason: FailureReason; gates?: unknown }
+  | { outcome: "aborted" };
 
 export type ApprovalState = "open" | "closed";
 export type ApprovalKind = "proposal" | "design";
+/** How a closed approval was closed: by `/approve` or by `/revise` (migration 0006). */
+export type ApprovalOutcome = "approved" | "revise" | "aborted";
+/** What awaits the owner's approval: the proposal, or a `large` change's design. */
+export type Stage = "proposal" | "design";
+
+/** The work item state in which the owner's commands are about the stage. */
+const AWAITING_STATE: Record<Stage, string> = { proposal: "awaiting-proposal-approval", design: "awaiting-design-approval" };
 
 export interface ApprovalRow {
   id: string;
@@ -88,6 +102,8 @@ export interface ApprovalRow {
   resolvedAt: Date | null;
   /** The login that resolved it. */
   resolvedBy: string | null;
+  /** How it was closed; null while open. */
+  outcome: ApprovalOutcome | null;
 }
 
 export interface NewApproval {
@@ -190,6 +206,7 @@ interface WorkItemRecord {
   state: string;
   execution_arn: string | null;
   design_flaws: number;
+  stopped_in: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -211,6 +228,7 @@ interface AttemptRecord {
   store_prefix: string | null;
   classification: unknown;
   gates: unknown;
+  comment_ids: string[];
 }
 
 interface ApprovalRecord {
@@ -222,6 +240,7 @@ interface ApprovalRecord {
   requested_at: Date;
   resolved_at: Date | null;
   resolved_by: string | null;
+  outcome: ApprovalOutcome | null;
 }
 
 interface TaskRecord {
@@ -251,10 +270,10 @@ interface MessageRecord {
   raw: unknown;
 }
 
-const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, created_at, updated_at";
+const WORK_ITEM_COLUMNS = "id, repository, issue_number, change_id, branch, state, execution_arn, design_flaws, stopped_in, created_at, updated_at";
 const ATTEMPT_COLUMNS =
-  "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates";
-const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by";
+  "id, work_item_id, state, role, n, started_at, ended_at, outcome, failure_reason, auth_mode, cost_usd_estimate, result, task_id, store_prefix, classification, gates, comment_ids";
+const APPROVAL_COLUMNS = "id, work_item_id, kind, state, task_token, requested_at, resolved_at, resolved_by, outcome";
 const TASK_COLUMNS = "id, work_item_id, task_id, position, title, depends_on, files, scenarios, tests, status, done_commit, plan_attempt_id";
 
 function toWorkItem(row: WorkItemRecord): WorkItemRow {
@@ -267,6 +286,7 @@ function toWorkItem(row: WorkItemRecord): WorkItemRow {
     state: row.state,
     executionArn: row.execution_arn,
     designFlaws: row.design_flaws,
+    stoppedIn: row.stopped_in,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -290,6 +310,8 @@ function toAttempt(row: AttemptRecord): AttemptRow {
     storePrefix: row.store_prefix,
     classification: row.classification,
     gates: row.gates,
+    // bigint[] comes back as strings, like every other id.
+    commentIds: row.comment_ids.map(String),
   };
 }
 
@@ -334,6 +356,7 @@ function toApproval(row: ApprovalRecord): ApprovalRow {
     requestedAt: row.requested_at,
     resolvedAt: row.resolved_at,
     resolvedBy: row.resolved_by,
+    outcome: row.outcome,
   };
 }
 
@@ -375,23 +398,91 @@ export async function findWorkItemByChangeId(db: Db, repository: string, changeI
   return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
 }
 
-/** Moves the work item to `state` and returns it; a missing work item is an error. */
-export async function setWorkItemState(db: Db, workItemId: string, state: string): Promise<WorkItemRow> {
+/** A state update refused: the work item was not in the state its writer expected. */
+export class StateChanged extends Error {
+  override readonly name = "StateChanged";
+  readonly workItemId: string;
+  readonly expected: string;
+  /** The state found instead. */
+  readonly actual: string;
+
+  constructor(workItemId: string, expected: string, actual: string) {
+    super(`work item ${workItemId} is ${actual}, not ${expected}, so its state was not changed`);
+    this.workItemId = workItemId;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/** The states a work item stops in; `stopped_in` records where it was. */
+const STOPPED = ["aborted", "escalated"];
+
+/**
+ * Moves the work item from `from` to `state` and returns it (compare-and-set, add-work-item-resume):
+ * one statement that changes the row only while it is in `from`, so a stopped worker that writes
+ * late cannot move an aborted work item. A work item in another state rejects with StateChanged; a
+ * missing one is an error. Stopping (`aborted`, `escalated`) records the state it stopped in as
+ * `stopped_in`, kept from one stopped state to the other; any other state clears it.
+ */
+export async function setWorkItemState(db: Db, workItemId: string, state: string, expected: { from: string }): Promise<WorkItemRow> {
   const { rows } = await db.query<WorkItemRecord>(
-    `UPDATE work_items SET state = $2, updated_at = now() WHERE id = $1 RETURNING ${WORK_ITEM_COLUMNS}`,
-    [workItemId, state],
+    `UPDATE work_items SET state = $2, updated_at = now(),
+       stopped_in = CASE WHEN $2 = ANY($4::text[]) THEN (CASE WHEN state = ANY($4::text[]) THEN stopped_in ELSE state END) ELSE NULL END
+     WHERE id = $1 AND state = $3 RETURNING ${WORK_ITEM_COLUMNS}`,
+    [workItemId, state, expected.from, STOPPED],
   );
-  if (rows[0] === undefined) throw new Error(`work item ${workItemId} not found`);
-  return toWorkItem(rows[0]);
+  if (rows[0] !== undefined) return toWorkItem(rows[0]);
+  const found = await db.query<{ state: string }>("SELECT state FROM work_items WHERE id = $1", [workItemId]);
+  const actual = found.rows[0]?.state;
+  if (actual === undefined) throw new Error(`work item ${workItemId} not found`);
+  throw new StateChanged(workItemId, expected.from, actual);
+}
+
+export interface Adoption {
+  /** The state the adopting execution read. */
+  from: string;
+  /** The state its entry state runs in. */
+  to: string;
+  executionArn: string;
+  /** Whether the design-flaw count starts again, as for a resumed escalation. */
+  freshDesignFlaws: boolean;
+}
+
+/**
+ * A resumed execution takes the work item over (add-work-item-resume, Adopt): its ARN is stored,
+ * and the work item moves from `from` to `to` (compare-and-set, as `setWorkItemState`), which
+ * clears `stopped_in`.
+ */
+export async function adoptWorkItem(db: Db, workItemId: string, adoption: Adoption): Promise<WorkItemRow> {
+  const { rows } = await db.query<WorkItemRecord>(
+    `UPDATE work_items SET state = $2, execution_arn = $4, stopped_in = NULL, updated_at = now(),
+       design_flaws = CASE WHEN $5 THEN 0 ELSE design_flaws END
+     WHERE id = $1 AND state = $3 RETURNING ${WORK_ITEM_COLUMNS}`,
+    [workItemId, adoption.to, adoption.from, adoption.executionArn, adoption.freshDesignFlaws],
+  );
+  if (rows[0] !== undefined) return toWorkItem(rows[0]);
+  const found = await db.query<{ state: string }>("SELECT state FROM work_items WHERE id = $1", [workItemId]);
+  const actual = found.rows[0]?.state;
+  if (actual === undefined) throw new Error(`work item ${workItemId} not found`);
+  throw new StateChanged(workItemId, adoption.from, actual);
+}
+
+/** Closes the work item's open attempts `aborted` and returns them, oldest first. */
+export async function abortOpenAttempts(db: Db, workItemId: string): Promise<AttemptRow[]> {
+  const { rows } = await db.query<AttemptRecord>(
+    `UPDATE attempts SET ended_at = clock_timestamp(), outcome = 'aborted' WHERE work_item_id = $1 AND ended_at IS NULL RETURNING ${ATTEMPT_COLUMNS}`,
+    [workItemId],
+  );
+  return rows.map(toAttempt).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
 }
 
 /** Opens the next attempt for the work item's state, numbered from 1. */
 export async function openAttempt(db: Db, attempt: NewAttempt): Promise<AttemptRow> {
   const { rows } = await db.query<AttemptRecord>(
-    `INSERT INTO attempts (work_item_id, state, role, n, task_id, store_prefix)
-     SELECT $1, $2, $3, COALESCE(MAX(n), 0) + 1, $4, $5 FROM attempts WHERE work_item_id = $1 AND state = $2
+    `INSERT INTO attempts (work_item_id, state, role, n, task_id, store_prefix, comment_ids)
+     SELECT $1, $2, $3, COALESCE(MAX(n), 0) + 1, $4, $5, $6::bigint[] FROM attempts WHERE work_item_id = $1 AND state = $2
      RETURNING ${ATTEMPT_COLUMNS}`,
-    [attempt.workItemId, attempt.state, attempt.role, attempt.taskId ?? null, attempt.storePrefix ?? null],
+    [attempt.workItemId, attempt.state, attempt.role, attempt.taskId ?? null, attempt.storePrefix ?? null, [...(attempt.commentIds ?? [])]],
   );
   return toAttempt(only(rows, "openAttempt"));
 }
@@ -399,8 +490,9 @@ export async function openAttempt(db: Db, attempt: NewAttempt): Promise<AttemptR
 /** Closes an open attempt, with the role's result if it succeeded; closing one twice is an error. */
 export async function closeAttempt(db: Db, attemptId: string, end: AttemptEnd): Promise<AttemptRow> {
   const failureReason = end.outcome === "failed" ? end.failureReason : null;
+  const gatesOf = end.outcome === "aborted" ? undefined : end.gates;
   const result = end.outcome === "succeeded" && end.result !== undefined ? JSON.stringify(end.result) : null;
-  const gates = end.gates === undefined ? null : JSON.stringify(end.gates);
+  const gates = gatesOf === undefined ? null : JSON.stringify(gatesOf);
   const { rows } = await db.query<AttemptRecord>(
     `UPDATE attempts SET ended_at = clock_timestamp(), outcome = $2, failure_reason = $3, result = $4::jsonb, gates = $5::jsonb
      WHERE id = $1 AND ended_at IS NULL
@@ -494,16 +586,16 @@ export async function findOpenApproval(db: Db, workItemId: string): Promise<Appr
 }
 
 /**
- * Closes the work item's open approval, resolved by `resolvedBy`, and returns it with its task
- * token. One statement, so of two concurrent closes only one gets the approval; the other, and
- * a close with nothing open, get undefined.
+ * Closes the work item's open approval, resolved by `resolvedBy` with `outcome`, and returns it
+ * with its task token. One statement, so of two concurrent closes only one gets the approval; the
+ * other, and a close with nothing open, get undefined.
  */
-export async function closeApproval(db: Db, workItemId: string, resolvedBy: string): Promise<ApprovalRow | undefined> {
+export async function closeApproval(db: Db, workItemId: string, resolvedBy: string, outcome: ApprovalOutcome = "approved"): Promise<ApprovalRow | undefined> {
   const { rows } = await db.query<ApprovalRecord>(
-    `UPDATE approvals SET state = 'closed', resolved_at = clock_timestamp(), resolved_by = $2
+    `UPDATE approvals SET state = 'closed', resolved_at = clock_timestamp(), resolved_by = $2, outcome = $3
      WHERE work_item_id = $1 AND state = 'open'
      RETURNING ${APPROVAL_COLUMNS}`,
-    [workItemId, resolvedBy],
+    [workItemId, resolvedBy, outcome],
   );
   return rows[0] === undefined ? undefined : toApproval(rows[0]);
 }
@@ -516,7 +608,7 @@ export async function reopenApproval(db: Db, approvalId: string): Promise<Approv
   let rows: ApprovalRecord[];
   try {
     ({ rows } = await db.query<ApprovalRecord>(
-      `UPDATE approvals SET state = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = $1 RETURNING ${APPROVAL_COLUMNS}`,
+      `UPDATE approvals SET state = 'open', resolved_at = NULL, resolved_by = NULL, outcome = NULL WHERE id = $1 RETURNING ${APPROVAL_COLUMNS}`,
       [approvalId],
     ));
   } catch (error) {
@@ -619,4 +711,152 @@ async function inTransaction(db: Db, fn: (client: pg.PoolClient | pg.Client) => 
   } finally {
     client.release();
   }
+}
+
+/** What an owner command came to (add-owner-commands design, "Ledger"). */
+export type CommentOutcome = "applied" | "busy" | "refused" | "unknown";
+
+export interface CommentRow {
+  id: string;
+  /** Null when the issue had no work item. */
+  workItemId: string | null;
+  repository: string;
+  issueNumber: number;
+  githubCommentId: number;
+  author: string;
+  /** As written, unknown verbs too. */
+  verb: string;
+  /** The comment's body as read at receipt. */
+  body: string;
+  receivedAt: Date;
+  outcome: CommentOutcome;
+  /** The work item's state the command met; null without a work item. */
+  stateMet: string | null;
+}
+
+export type NewComment = Omit<CommentRow, "id" | "receivedAt">;
+
+interface CommentRecord {
+  id: string;
+  work_item_id: string | null;
+  repository: string;
+  issue_number: number;
+  github_comment_id: string;
+  author: string;
+  verb: string;
+  body: string;
+  received_at: Date;
+  outcome: CommentOutcome;
+  state_met: string | null;
+}
+
+const COMMENT_COLUMNS = "id, work_item_id, repository, issue_number, github_comment_id, author, verb, body, received_at, outcome, state_met";
+
+/** The verbs whose applied command counts as an owner intervention (docs/m3.5-owner-commands.md, section 3). */
+const INTERVENTION_VERBS = ["approve", "revise", "abort", "resume"];
+
+function toComment(row: CommentRecord): CommentRow {
+  return {
+    id: row.id,
+    workItemId: row.work_item_id,
+    repository: row.repository,
+    issueNumber: row.issue_number,
+    // GitHub's ids are 64-bit; today's fit a double exactly (checked on the way in).
+    githubCommentId: Number(row.github_comment_id),
+    author: row.author,
+    verb: row.verb,
+    body: row.body,
+    receivedAt: row.received_at,
+    outcome: row.outcome,
+    stateMet: row.state_met,
+  };
+}
+
+/**
+ * The issue's work item, locked (`SELECT … FOR UPDATE`) until the caller's transaction ends, so
+ * commands on one work item are decided one at a time. `db` must be a client inside a
+ * transaction; on a pool the lock would end with the statement. Undefined without a work item:
+ * nothing is locked then.
+ */
+export async function lockWorkItem(db: Db, repository: string, issueNumber: number): Promise<WorkItemRow | undefined> {
+  const { rows } = await db.query<WorkItemRecord>(`SELECT ${WORK_ITEM_COLUMNS} FROM work_items WHERE repository = $1 AND issue_number = $2 FOR UPDATE`, [
+    repository,
+    issueNumber,
+  ]);
+  return rows[0] === undefined ? undefined : toWorkItem(rows[0]);
+}
+
+/**
+ * Records an owner command; undefined when its GitHub comment id is recorded already, which then
+ * stays as it was. A concurrent record of the same id waits for the first to commit, then gets
+ * undefined.
+ */
+export async function recordComment(db: Db, comment: NewComment): Promise<CommentRow | undefined> {
+  if (!Number.isSafeInteger(comment.githubCommentId) || comment.githubCommentId <= 0) {
+    throw new Error(`not a GitHub comment id: ${String(comment.githubCommentId)}`);
+  }
+  const { rows } = await db.query<CommentRecord>(
+    `INSERT INTO comments (work_item_id, repository, issue_number, github_comment_id, author, verb, body, outcome, state_met)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (github_comment_id) DO NOTHING
+     RETURNING ${COMMENT_COLUMNS}`,
+    [comment.workItemId, comment.repository, comment.issueNumber, comment.githubCommentId, comment.author, comment.verb, comment.body, comment.outcome, comment.stateMet],
+  );
+  return rows[0] === undefined ? undefined : toComment(rows[0]);
+}
+
+/** Sets what a recorded command came to, once its effect is known; a missing row is an error. */
+export async function setCommentOutcome(db: Db, commentId: string, outcome: CommentOutcome): Promise<CommentRow> {
+  const { rows } = await db.query<CommentRecord>(`UPDATE comments SET outcome = $2 WHERE id = $1 RETURNING ${COMMENT_COLUMNS}`, [commentId, outcome]);
+  if (rows[0] === undefined) throw new Error(`comment ${commentId} not found`);
+  return toComment(rows[0]);
+}
+
+/** The work item's owner commands, oldest first. */
+export async function listComments(db: Db, workItemId: string): Promise<CommentRow[]> {
+  const { rows } = await db.query<CommentRecord>(`SELECT ${COMMENT_COLUMNS} FROM comments WHERE work_item_id = $1 ORDER BY received_at, id`, [workItemId]);
+  return rows.map(toComment);
+}
+
+/** The work item's owner interventions: its applied `/approve`, `/revise`, `/abort` and `/resume`. */
+export async function countInterventions(db: Db, workItemId: string): Promise<number> {
+  const { rows } = await db.query<{ n: string }>("SELECT count(*) AS n FROM comments WHERE work_item_id = $1 AND outcome = 'applied' AND verb = ANY($2)", [
+    workItemId,
+    INTERVENTION_VERBS,
+  ]);
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** One of a stage's questions, with the attempt that answers or answered it, if one was opened. */
+export interface StageQuestion {
+  comment: CommentRow;
+  attempt: AttemptRow | undefined;
+}
+
+/**
+ * The stage's applied owner commands, oldest first: the comments applied while the work item
+ * awaited the stage's approval (`/approve`, `/revise`, `/question`).
+ */
+export async function stageComments(db: Db, workItemId: string, stage: Stage): Promise<CommentRow[]> {
+  const { rows } = await db.query<CommentRecord>(
+    `SELECT ${COMMENT_COLUMNS} FROM comments WHERE work_item_id = $1 AND state_met = $2 AND outcome = 'applied' ORDER BY received_at, id`,
+    [workItemId, AWAITING_STATE[stage]],
+  );
+  return rows.map(toComment);
+}
+
+/** The stage's applied `/question`s, oldest first, each with the `<stage>-question` attempt that names it. */
+export async function stageQuestions(db: Db, workItemId: string, stage: Stage): Promise<StageQuestion[]> {
+  const questions = (await stageComments(db, workItemId, stage)).filter((comment) => comment.verb === "question");
+  const attempts = (await listAttempts(db, workItemId)).filter((attempt) => attempt.state === `${stage}-question`);
+  return questions.map((comment) => ({ comment, attempt: attempts.filter((attempt) => attempt.commentIds.includes(comment.id)).at(-1) }));
+}
+
+/** The work item's open question attempt, of either stage; a work item answers one question at a time. */
+export async function openQuestionAttempt(db: Db, workItemId: string): Promise<AttemptRow | undefined> {
+  const { rows } = await db.query<AttemptRecord>(
+    `SELECT ${ATTEMPT_COLUMNS} FROM attempts WHERE work_item_id = $1 AND state IN ('proposal-question', 'design-question') AND ended_at IS NULL ORDER BY id DESC LIMIT 1`,
+    [workItemId],
+  );
+  return rows[0] === undefined ? undefined : toAttempt(rows[0]);
 }

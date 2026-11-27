@@ -5,6 +5,7 @@
  * No AWS.
  */
 import { describe, expect, it } from "vitest";
+import { ENTRIES } from "../src/entries.ts";
 import { definition, type WorkerTaskConfig } from "../src/state-machine.ts";
 import { RUN_TASK_SYNC, RUN_TASK_WAIT_FOR_TOKEN, simulate, type Simulation, type TaskCall, type TaskOutcome } from "./asl-simulator.ts";
 
@@ -26,11 +27,12 @@ const PLANNED = { exitCode: 0, changeId: CHANGE_ID, tasks: ["1.1", "1.2"] };
  * The tasks the definition runs, as their command's first word; the design approval's
  * `await-approval --kind design` is `await-design-approval`.
  */
-type TaskKind = "intake" | "proposal" | "await-approval" | "approved" | "design" | "await-design-approval" | "plan" | "step" | "build" | "open-pr" | "escalate";
+type TaskKind = "adopt" | "intake" | "proposal" | "await-approval" | "approved" | "design" | "await-design-approval" | "plan" | "step" | "build" | "open-pr" | "escalate";
 
 function kindOf(call: TaskCall): string {
   const [first] = call.command;
   if (first === "await-approval" && call.command.includes("design")) return "await-design-approval";
+  if (first === "intake" && call.command.includes("--resume")) return "adopt";
   return first ?? "";
 }
 
@@ -38,9 +40,9 @@ function kindOf(call: TaskCall): string {
  * Runs the definition with each task's outcomes, in order. A task with no outcome left exits 0
  * (`.sync`), is approved (`.waitForTaskToken`), or for Plan returns PLANNED.
  */
-async function run(script: Partial<Record<TaskKind, TaskOutcome[]>> = {}): Promise<Simulation> {
+async function run(script: Partial<Record<TaskKind, TaskOutcome[]>> = {}, input: unknown = INPUT): Promise<Simulation> {
   const queues = Object.fromEntries(Object.entries(script).map(([kind, outcomes]) => [kind, [...outcomes]])) as Partial<Record<string, TaskOutcome[]>>;
-  return simulate(definition(CONFIG), INPUT, {
+  return simulate(definition(CONFIG), input, {
     executionArn: EXECUTION,
     onTask: (call: TaskCall) => {
       const kind = kindOf(call);
@@ -284,6 +286,66 @@ describe("state machine definition", () => {
     expect(kinds(simulation).slice(-3)).toEqual(["step", "build", "step"]);
   });
 
+  it("Scenario: Approval decision routes the execution", async () => {
+    // The worker sends only the decision; a stray field must not reach the history either.
+    const comment = "Use SQLite, not CSV, for the export";
+    const simulation = await run({ "await-approval": [{ success: { decision: "revise", comment } }, { success: { decision: "approve" } }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 6)).toEqual(["intake", "proposal", "await-approval", "proposal", "await-approval", "approved"]);
+    const path = simulation.path.slice(0, simulation.path.indexOf("Approved") + 1);
+    expect(path.filter((state) => ["AwaitApproval", "ApprovalDecision", "Proposal", "Approved"].includes(state))).toEqual([
+      "Proposal",
+      "AwaitApproval",
+      "ApprovalDecision",
+      "Proposal",
+      "AwaitApproval",
+      "ApprovalDecision",
+      "Approved",
+    ]);
+    expect(JSON.stringify(simulation.records)).not.toContain(comment);
+    // The decision is a fixed word in the history.
+    const decisions = simulation.records.filter((record) => record.state === "AwaitApproval").map((record) => record.output);
+    expect(decisions).toEqual([{ decision: "revise" }, { decision: "approve" }]);
+
+    // The design approval routes the same way: revise to Design, approve to Plan.
+    const designed = await run({ design: [{ exit: 11 }, { exit: 11 }], "await-design-approval": [{ success: { decision: "revise", comment } }, { success: { decision: "approve" } }] });
+
+    expect(designed.status).toBe("SUCCEEDED");
+    expect(kinds(designed).slice(4, 9)).toEqual(["design", "await-design-approval", "design", "await-design-approval", "plan"]);
+    expect(designed.path).toContain("DesignApprovalDecision");
+    expect(JSON.stringify(designed.records)).not.toContain(comment);
+  });
+
+  it("Scenario: Revised proposal routes on its new complexity", async () => {
+    // Small at first; the revision makes it medium, so Approved exits 0 and the work item goes to Design.
+    const simulation = await run({ "await-approval": [{ success: { decision: "revise" } }, { success: { decision: "approve" } }], approved: [{ exit: 0 }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 8)).toEqual(["intake", "proposal", "await-approval", "proposal", "await-approval", "approved", "design", "plan"]);
+  });
+
+  it("starts a revised Proposal with its retries unused", async () => {
+    const simulation = await run({
+      proposal: [{ exit: 1 }, { exit: 0 }, { exit: 1 }, { exit: 1 }, { exit: 0 }],
+      "await-approval": [{ success: { decision: "revise" } }, { success: { decision: "approve" } }],
+    });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 9)).toEqual(["intake", "proposal", "proposal", "await-approval", "proposal", "proposal", "proposal", "await-approval", "approved"]);
+    expect(simulation.waits).toEqual([30, 30, 90]);
+  });
+
+  it("Scenario: Large design waits for the owner", async () => {
+    const simulation = await run({ design: [{ exit: 11 }], "await-design-approval": [{ success: { decision: "approve" } }] });
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    // No design reviewer task: the execution waits for the owner's decision on the design, then plans.
+    expect(kinds(simulation).slice(4, 7)).toEqual(["design", "await-design-approval", "plan"]);
+    const path = simulation.path;
+    expect(path.slice(path.indexOf("AwaitDesignApproval"), path.indexOf("Plan") + 1)).toEqual(["AwaitDesignApproval", "DesignApprovalDecision", "Plan"]);
+  });
+
   it("Scenario: Escalated proposal ends the execution", async () => {
     const simulation = await run({ proposal: [{ exit: 3 }] });
 
@@ -405,11 +467,16 @@ describe("state machine definition", () => {
       "$states.input.issueNumber",
       "$states.input",
       "$states.context.Execution.Id",
+      "$states.context.Execution.Input.resume",
       "$states.context.Task.Token",
       "$states.result.Containers[0].ExitCode",
       "$states.result.exitCode",
       "$states.result.changeId",
       "$states.result.tasks",
+      "$states.result.decision",
+      "$states.result.entry",
+      "$states.input.entry",
+      "$states.input.decision",
       "$states.errorOutput.Cause",
       "$states.input.exitCode",
     ]);
@@ -438,15 +505,19 @@ describe("state machine definition", () => {
       await run({ proposal: [{ exit: 1 }, { notStarted: true }, { exit: 1 }] }),
       await run({ approved: [{ exit: 2 }] }),
       await run({ "await-approval": [{ success: leaky }] }),
+      await run({ "await-approval": [{ success: { ...leaky, decision: "revise" } }, { success: { ...leaky, decision: "## Why …" } }] }),
       await run({ design: [{ exit: 11 }], "await-design-approval": [{ success: leaky }] }),
       await run({ plan: [{ success: { ...PLANNED, ...leaky } }] }),
       await run({ step: [{ exit: 20 }, { exit: 21 }, { exit: 13 }], build: [{ exit: 1 }, { exit: 0 }] }),
       await run({ step: [{ exit: 20 }, { exit: 3 }] }),
       await run({ step: [{ exit: 1 }, { exit: 1 }, { exit: 1 }] }),
+      await run({ adopt: [{ success: { ...adopted("build", ["1.2"]), ...leaky } }] }, RESUMED),
+      await run({ adopt: [{ success: { ...adopted("plan"), entry: "## Why …" } }] }, RESUMED),
+      await run({ adopt: [{ success: { exitCode: 4, entry: null, changeId: null, tasks: [] } }] }, RESUMED),
     ];
     const words = new Set([
       ...["intake", "proposal", "await-approval", "approved", "design", "plan", "step", "build", "open-pr", "escalate"],
-      ...["--issue", "--execution", "--reason", "--kind", "--change", "--task"],
+      ...["--issue", "--execution", "--reason", "--kind", "--change", "--task", "--resume"],
       ...[String(ISSUE), EXECUTION, CHANGE_ID, "1.1", "1.2", "worker-failed", "worker-refused"],
     ]);
     for (const simulation of simulations) {
@@ -466,7 +537,13 @@ describe("state machine definition", () => {
             continue;
           }
           expect(typeof value, record.state).toBe("object");
-          for (const key of Object.keys(value as object)) expect(["issueNumber", "exitCode"], `${record.state}: ${key}`).toContain(key);
+          for (const key of Object.keys(value as object)) expect(["issueNumber", "resume", "exitCode", "decision", "entry"], `${record.state}: ${key}`).toContain(key);
+          const resume = (value as { resume?: unknown }).resume;
+          if (resume !== undefined) expect(typeof resume, record.state).toBe("boolean");
+          const decision = (value as { decision?: unknown }).decision;
+          if (decision !== undefined) expect(["approve", "revise"], record.state).toContain(decision);
+          const entry = (value as { entry?: unknown }).entry;
+          if (entry !== undefined && entry !== null) expect(ENTRIES, record.state).toContain(entry);
         }
         for (const [key, value] of Object.entries(record.variables)) {
           expect(["issueNumber", "changeId", "tasks", "taskId", "tries", "itemTries", "reason"], key).toContain(key);
@@ -481,6 +558,89 @@ describe("state machine definition", () => {
       for (const record of simulation.records.slice(1)) {
         expect(JSON.stringify(record.input ?? null), record.state).not.toMatch(/Containers|task-token|approvedBy|## Why|diff --git/);
       }
+    }
+  });
+});
+
+/** A resumed execution's input, as `/resume` starts it. */
+const RESUMED = { issueNumber: ISSUE, resume: true };
+const ADOPT = ["intake", ...issue, "--resume", "--execution", EXECUTION];
+/** Adopt's answer: the entry, the change id, and for `build` the unfinished tasks. */
+const adopted = (entry: string, tasks: string[] = []) => ({ exitCode: 0, entry, changeId: CHANGE_ID, tasks });
+
+describe("state machine definition: resuming (add-work-item-resume)", () => {
+  it("starts with Intake when the input does not ask to resume", async () => {
+    for (const input of [INPUT, { issueNumber: ISSUE, resume: false }]) {
+      const simulation = await run({}, input);
+      expect(simulation.status).toBe("SUCCEEDED");
+      expect(kinds(simulation)[0]).toBe("intake");
+      expect(commands(simulation)[0]).toEqual(INTAKE);
+    }
+  });
+
+  it("starts with Adopt, a waitForTaskToken task with its token, when the input asks to resume", async () => {
+    const simulation = await run({ adopt: [{ success: adopted("plan") }] }, RESUMED);
+
+    const [first] = simulation.tasks;
+    expect(first?.command).toEqual(ADOPT);
+    expect(first?.resource).toBe(RUN_TASK_WAIT_FOR_TOKEN);
+    expect(first?.environment).toEqual({ FACTORY_TASK_TOKEN: first?.taskToken });
+    expect(kinds(simulation)).not.toContain("intake");
+  });
+
+  it.each([
+    ["proposal", "proposal"],
+    ["await-approval", "await-approval"],
+    ["approved", "approved"],
+    ["design", "design"],
+    ["await-design", "await-design-approval"],
+    ["plan", "plan"],
+    ["build", "step"],
+  ] as const)("enters %s from Adopt's answer", async (entry, firstTask) => {
+    const simulation = await run({ adopt: [{ success: adopted(entry, ["1.2"]) }] }, RESUMED);
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(kinds(simulation).slice(0, 2)).toEqual(["adopt", firstTask]);
+    expect(ENTRIES).toContain(entry);
+  });
+
+  it("Scenario: Resume during the build skips finished tasks", async () => {
+    const simulation = await run({ adopt: [{ success: adopted("build", ["1.3"]) }] }, RESUMED);
+
+    // BuildTasks takes Adopt's change id and tasks: 1.1 and 1.2 were done, so only 1.3 is built.
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(commands(simulation)).toEqual([ADOPT, step("1.3"), ["open-pr", ...issue]]);
+    expect(simulation.path).toContain("BuildTasks");
+    expect(simulation.path).not.toContain("Plan");
+  });
+
+  it("builds with Adopt's change id", async () => {
+    const simulation = await run({ adopt: [{ success: adopted("build", ["1.3"]) }], step: [{ exit: 20 }] }, RESUMED);
+
+    expect(commands(simulation)).toContainEqual(build("1.3"));
+  });
+
+  it("Scenario: Resume after an execution failed outside the factory", async () => {
+    const simulation = await run({ adopt: [{ success: adopted("plan") }] }, RESUMED);
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(commands(simulation)).toEqual([ADOPT, ["plan", ...issue], step("1.1"), step("1.2"), ["open-pr", ...issue]]);
+  });
+
+  it("ends successfully when Adopt answers exit 4", async () => {
+    const simulation = await run({ adopt: [{ success: { exitCode: 4, entry: null, changeId: null, tasks: [] } }] }, RESUMED);
+
+    expect(simulation.status).toBe("SUCCEEDED");
+    expect(simulation.path.at(-1)).toBe("Ended");
+    expect(kinds(simulation)).toEqual(["adopt"]);
+  });
+
+  it("escalates when Adopt fails, or answers an entry it does not know, without retrying", async () => {
+    for (const outcome of [{ failure: { error: "factory.AdoptFailed", cause: "failed" } }, { success: { ...adopted("plan"), entry: "deploy" } }]) {
+      const simulation = await run({ adopt: [outcome] }, RESUMED);
+
+      expect(simulation.status).toBe("FAILED");
+      expect(commands(simulation)).toEqual([ADOPT, ["escalate", ...issue, "--reason", "worker-failed"]]);
     }
   });
 });

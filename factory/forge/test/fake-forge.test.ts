@@ -22,6 +22,9 @@ describeForgeContract("FakeForge", () => {
     addIssue: (issue) => {
       forge.addIssue(issue);
     },
+    addComment: (comment) => {
+      forge.addComment(comment);
+    },
     setBranch: (branch, sha) => {
       forge.setBranch(branch, sha);
     },
@@ -64,6 +67,9 @@ describe("FakeForge with a git remote", () => {
       addIssue: (issue) => {
         forge.addIssue(issue);
       },
+      addComment: (comment) => {
+        forge.addComment(comment);
+      },
       setBranch: (branch, sha) => {
         forge.setBranch(branch, sha);
       },
@@ -82,6 +88,25 @@ describe("FakeForge with a git remote", () => {
 });
 
 describe("FakeForge", () => {
+  it("reads back the comments it posted, as its bot's", async () => {
+    const forge = new FakeForge({ issues: [{ number: 12, title: "Import Kindle vocab.db" }] });
+    const seeded = forge.addComment({ issueNumber: 12, author: "miklospocsaji", body: "/status" });
+
+    await forge.comment(12, "Work item `add-x` is `proposal`.");
+
+    expect(forge.comments).toEqual([{ issueNumber: 12, body: "Work item `add-x` is `proposal`." }]);
+    expect(await forge.getComment(seeded.id)).toMatchObject({ issueNumber: 12, author: "miklospocsaji", body: "/status" });
+    const posted = forge.issueComments(12).at(-1);
+    expect(posted).toMatchObject({ issueNumber: 12, author: "ceh-app[bot]", body: "Work item `add-x` is `proposal`." });
+    expect(posted?.id).not.toBe(seeded.id);
+  });
+
+  it("refuses a seeded comment on an issue it does not have", () => {
+    const forge = new FakeForge();
+
+    expect(() => forge.addComment({ issueNumber: 404, author: "miklospocsaji", body: "/status" })).toThrow(ForgeError);
+  });
+
   it("can be seeded with issues up front", async () => {
     const forge = new FakeForge({ issues: [{ number: 12, title: "Import Kindle vocab.db", body: "Read vocab.db" }] });
 

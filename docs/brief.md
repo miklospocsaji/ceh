@@ -60,7 +60,7 @@ Inside the build loop a failing gate goes to the classifier: bugs retry the task
 | Gates | Typecheck, lint, unit, e2e, contract checks, `openspec validate`, scenario coverage | Deterministic scripts run in the build container after each build role, never by an agent and never in the worker, which does not run agent-written code |
 | Deployer | Per-PR preview stack, production release | CDK deploy, deterministic |
 | Ledger | Work items, attempts, artifacts, costs, events | Postgres on a dedicated Aurora Serverless v2 cluster with auto-pause, separate from the app's; JSON results in the ledger in M2, in S3 from M3 |
-| Approvals | Pause for owner decisions and resume | Step Functions `waitForTaskToken`, with the token in the ledger; a PR/issue comment command starts a worker task that resumes it |
+| Approvals and commands | Pause for owner decisions and resume; from M3.5 the owner's other commands (`docs/m3.5-owner-commands.md`) | Step Functions `waitForTaskToken`, with the token in the ledger; an owner's issue comment whose first line is a command starts a worker task that acts on it |
 | Console | One page per work item: state, tasks, attempts, cost, links | Small read-only web page over the ledger (milestone 6) |
 | Secrets | Model key, GitHub App key, webhook secret, ledger credentials | SSM Parameter Store SecureStrings (free); Secrets Manager only for the generated ledger credentials; injected per task |
 
@@ -68,7 +68,7 @@ Inside the build loop a failing gate goes to the classifier: bugs retry the task
 
 1. **Intake:** check the issue states a requirement; create the ledger row and a verb-led OpenSpec change id (for example `add-vocab-import`), which is also the branch name.
 2. **Proposal:** the proposal author writes `proposal.md` (why, what, impact) and delta specs (requirements with WHEN/THEN scenarios) under `openspec/changes/<id>/`, and tags the change `small`, `medium` or `large` as `x-complexity` in the change's `.openspec.yaml` (strict validation rejects unprefixed custom keys). Open questions go to the owner as an issue comment. `openspec validate <id> --strict` must pass.
-3. **Proposal approval (human):** the owner replies `/approve` or edits the files on the branch.
+3. **Proposal approval (human):** the owner replies `/approve`, edits the files on the branch, or (from M3.5) replies `/revise` with answers or changes, which sends the proposal back to its author, or `/question`, which its author answers without changing anything.
 4. **Design:** the architect writes `design.md` (components, data model, decisions, risks) and the code contracts in the target's contracts path. Skipped for `small` changes.
 5. **Design review:** `large` changes wait for owner approval, `medium` changes get a fresh-context design-reviewer agent, `small` changes skip it.
 6. **Plan:** the planner writes `tasks.md` (numbered checklist) and a `tasks.json` result listing each task's dependencies, files, scenarios and tests. Every task must fit one implementer session.
@@ -280,7 +280,7 @@ The app lives in `miklospocsaji/vocab`, with its product brief (`docs/brief.md` 
 
 ## 7. Milestones
 
-Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; M3.25 is done, M3.5 is still a draft.
+Ten milestones, each ending in a working end-to-end path; app features enter as factory workload from milestone 3 onwards. M3.25 and M3.5 were added during M3; both are done.
 
 1. **M0 Foundations**
    - Deliverables: monorepo with pnpm, strict TS, Vitest, lint; `openspec init` with project conventions filled in (`openspec/config.yaml`); `CLAUDE.md`; ADRs 0001–0005 (stack, orchestration, ledger store, OpenSpec usage and capabilities, fixture anonymisation); a basic GitHub Actions CI running the gates on every PR, including `openspec validate --all --strict`; an anonymised copy of the owner's real `vocab.db` in `app/fixtures/`, produced by a committed script; the approved OpenSpec changes for M1's `orchestration` and `roles` work.
@@ -329,23 +329,19 @@ Ten milestones, each ending in a working end-to-end path; app features enter as 
      - **Step 3: Make `ceh` target-aware.** The OpenSpec change is `add-target-repositories`; its scope is the list above under "What `ceh` needs to work on a repository it does not live in", plus capabilities left to the target (ADR 0014). The owner approves it, and a local Claude Code session builds it in `ceh` (factory roles never change the factory). The change carries the renames in code (the packages, the App slug in `cdk.json`, the resource tag); the owner renamed the GitHub App itself on GitHub (`ceh-app`).
      - **Step 4: Deploy from `ceh`.** The `infra:diff` shows new images, the renamed tag, the App slug and the new task environment, and no replacement of the ledger or any other stateful resource. Then the owner files a fresh small `vocab` issue for the exit run.
    - Exit: `ceh`, deployed from its own repository, takes that issue to a pull request opened by `ceh-app[bot]`, with every task built in vocab's build image and its gates green. `vocab`'s CI runs only the app's gates, and `ceh`'s CI only the factory's.
-6. **M3.5 Owner comments and resuming work items (draft, to be settled)**
-   - Why: in M3 the factory ignores every issue comment except `/approve`, and its roles read only the issue's title and body. The owner's answers to a proposal's open questions, and any other feedback, reach the factory only by editing the issue body. That edit reaches Design and Plan, never the proposal already written.
-   - Why, too: a work item whose execution was stopped or failed cannot be resumed. The ledger ties the work item to its execution, so relabelling the issue starts an execution whose Intake answers `duplicate` and ends. The only way on is a new issue that repeats Intake, Proposal, the approval, Design and Plan. This happened in M3's exit run: the owner stopped #11's execution over a build-task bug, and after the fix the work went on as a new issue.
-   - Scope: the factory reads the owner's issue comments and acts on them. Comments are untrusted input, like the issue body, and only the owner's count. The owner can resume a work item whose execution has ended, from the state it reached.
-   - To settle for resuming:
-     - the trigger: a command such as `/resume`, a relabel, or both
-     - how Intake adopts the work item: it checks that the old execution is no longer running, which needs `states:DescribeExecution`
-     - how the later states skip what is done; each must be idempotent on a work item already past it, including the approval waits, which must not ask for a second `/approve`
-     - what happens to open attempts and the attempt counts: does a stop count toward the infra limit?
-     - whether the owner may resume an escalated work item, and with which evidence
-   - To settle: go through what a comment means in each state machine state, and what the factory does with it there. For example:
-     - while a proposal or a design awaits approval: answers to open questions, or a request to revise before approving
-     - while a worker or build task runs: queued, ignored, or a reason to stop
-     - after a work item has escalated or ended
-   - Also to settle: whether a revision is a new command next to `/approve` or any non-command comment; which roles see which comments; how comments are recorded in the ledger; how a revision re-runs a state without a second execution; what the execution history may carry (pointers only).
-   - Settled in a fresh session after M3.25, as an OpenSpec change of its own, built in `ceh`.
-   - Exit: to be decided with the scope.
+6. **M3.5 Owner commands and resuming work items (settled 15 November 2026, done 26 November 2026)**
+   - Why: in M3 the factory ignores every issue comment except `/approve`, so the owner's answers and feedback never reach a proposal already written. A stopped or failed work item cannot be resumed, only refiled as a new issue (M3's #11). The owner cannot stop a work item, ask where it stands, or ask about a proposal from the issue.
+   - Scope, in `docs/m3.5-owner-commands.md`: owner-only commands on a comment's first line (`/approve`, `/revise`, `/question`, `/abort`, `/resume`, `/status`, `/help`), all other comments ignored. While a proposal or design awaits approval:
+     - `/revise` sends it back to its author with the comment.
+     - `/question` gets an answer from a read-only session of its author and changes nothing.
+
+     A command that arrives while a role runs is refused with a reply, never queued. `/abort` pauses a work item and `/resume` continues it from where it stopped; closing the issue is the final stop. `/restart` is left out. The document holds the detailed design, what each command means in each state, the mechanics, and the settled and open decisions.
+   - Three OpenSpec changes in `ceh`, built in this order by a local Claude Code session: `add-owner-commands`, `add-approval-feedback`, `add-work-item-resume`.
+   - Exit: in `docs/m3.5-owner-commands.md`, section 11. It is a cloud run on a fresh `vocab` issue with:
+     - a `/question` and a `/revise` that answers an open question
+     - a refused busy command and ignored non-commands
+     - `/status`
+     - an `/abort` and `/resume` during Build that ends in a pull request with no task rebuilt and no second `/approve`
 7. **M4 Review, preview, QA and release**
    - Deliverables: reviewer role; per-PR preview stack; QA-explorer role with Playwright MCP on desktop and mobile viewports; QA report and screenshots attached to the PR; acceptance gate; Release state with production deploy and `openspec archive <id> --yes`.
    - Workload: auth with Cognito, trajectories CRUD, upload of `vocab.db` with a minimal unstyled UI.
@@ -382,3 +378,4 @@ Decided on 26–27 October 2026. Claude Code treats these as requirements and re
 - [x] **Failure classifier (M3, 9 November 2026):** an Agent SDK session with no tools, a cap of 3 turns and structured output, instead of a Messages API call, so it runs in both auth modes and is recorded like every other role.
 - [x] **Local build runs (M3, 9 November 2026):** local runs of the build container keep the subscription token (ADR 0006). Accepted risk: agent-written code in the container can read it, and it has no spend limit of its own.
 - [x] **Factory repository (M3.25, 14 November 2026):** the factory becomes `ceh`, a public repository, named for several projects but shipping one target. Target configs and per-target build Dockerfiles live in `ceh`, never in the target. Build images carry only the toolchain; dependencies are installed online before each session. The packages, the GitHub App and the resource tag are renamed to `ceh`; the stack keeps the name `Factory`. Old work items are closed and refiled rather than resumed. The split comes first, then the target-aware change.
+- [x] **Owner commands (M3.5, 15 November 2026):** commands are a first-line `/<verb>` by the owner on an issue; everything else is ignored, with no reply (ADR 0015). One `/revise` serves both answers and change requests, rather than a separate `/answer`. Commands that arrive while a role runs are refused with a busy reply, never queued. At most 5 revisions per stage. `/question` is answered in the `command` task by a read-only session of the awaiting stage's author, with at most 10 questions per stage and $0.30 and 10 turns per answer. `/abort` pauses a work item, which `/resume` continues; closing the issue is the final stop. Work items are resumed by `/resume` only, not by relabelling, and resuming an escalated one resets its retry counts. `/restart` is left out of M3.5. M3.5 ships as three OpenSpec changes, in order: `add-owner-commands`, `add-approval-feedback`, `add-work-item-resume` (`docs/m3.5-owner-commands.md`).

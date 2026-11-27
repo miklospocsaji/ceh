@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-15
+goal: "M3.5, change 3 of 3: /abort pauses a work item, /resume continues it in a new execution
+  from where it stopped, and closing the issue is the final stop"
+x-complexity: large

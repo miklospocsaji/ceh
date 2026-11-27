@@ -5,12 +5,14 @@
  *
  * With the `remote` option, branches live in that git repository instead of in memory, so
  * a branch Intake creates can be fetched by a worktree, as on the real forge. Issues, comments
- * and pull requests stay in memory either way; its pull requests are all open.
+ * and pull requests stay in memory either way; its pull requests are all open. Comments can be
+ * seeded with an author (`addComment`), and the ones the factory posts are its bot's; both can be
+ * read back by id.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
-import { ForgeError, type CreatedBranch, type Forge, type NewPullRequest, type PullRequest, type Issue, type PushBranchOptions } from "./forge.ts";
+import { ForgeError, type CreatedBranch, type Forge, type NewPullRequest, type PullRequest, type Issue, type IssueComment, type PushBranchOptions } from "./forge.ts";
 
 export interface FakeIssue {
   number: number;
@@ -31,6 +33,17 @@ export interface FakeForgeOptions {
    * set, branches live in it, and `defaultSha` is ignored.
    */
   remote?: string;
+  /** The author of the comments the factory posts; defaults to `ceh-app[bot]`. */
+  botLogin?: string;
+}
+
+export interface FakeIssueComment {
+  /** Defaults to the next free id. */
+  id?: number;
+  issueNumber: number;
+  author: string;
+  body: string;
+  createdAt?: Date;
 }
 
 export interface FakeComment {
@@ -60,10 +73,15 @@ export class FakeForge implements Forge {
   readonly #issues = new Map<number, Issue>();
   readonly #branches = new Map<string, string>();
   readonly #remote: string | undefined;
+  readonly #botLogin: string;
+  /** Seeded and posted comments, by id. */
+  readonly #issueComments = new Map<number, IssueComment>();
+  #nextCommentId = 1;
 
   constructor(options: FakeForgeOptions = {}) {
     this.#defaultBranch = options.defaultBranch ?? "master";
     this.#remote = options.remote;
+    this.#botLogin = options.botLogin ?? "ceh-app[bot]";
     if (this.#remote === undefined) this.#branches.set(this.#defaultBranch, options.defaultSha ?? FAKE_SHA);
     for (const issue of options.issues ?? []) this.addIssue(issue);
   }
@@ -102,7 +120,28 @@ export class FakeForge implements Forge {
   comment(issueNumber: number, body: string): Promise<void> {
     if (!this.#issues.has(issueNumber)) return Promise.reject(notFound(issueNumber));
     this.comments.push({ issueNumber, body });
+    this.addComment({ issueNumber, author: this.#botLogin, body });
     return Promise.resolve();
+  }
+
+  /** Seeds a comment as if its author had written it; throws for an issue it does not have. */
+  addComment(comment: FakeIssueComment): IssueComment {
+    if (!this.#issues.has(comment.issueNumber)) throw notFound(comment.issueNumber);
+    const id = comment.id ?? this.#nextCommentId++;
+    const stored: IssueComment = { id, issueNumber: comment.issueNumber, author: comment.author, body: comment.body, createdAt: comment.createdAt ?? new Date() };
+    this.#issueComments.set(id, stored);
+    return { ...stored };
+  }
+
+  /** Every comment on the issue, seeded or posted, in the order they arrived. */
+  issueComments(issueNumber: number): IssueComment[] {
+    return [...this.#issueComments.values()].filter((c) => c.issueNumber === issueNumber).map((c) => ({ ...c }));
+  }
+
+  getComment(commentId: number): Promise<IssueComment> {
+    const found = this.#issueComments.get(commentId);
+    if (found === undefined) return Promise.reject(new ForgeError(`comment ${String(commentId)} not found`, "not-found", 404));
+    return Promise.resolve({ ...found });
   }
 
   async branchExists(branch: string): Promise<boolean> {

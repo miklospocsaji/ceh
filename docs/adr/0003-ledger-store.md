@@ -1,6 +1,6 @@
 # 0003 Ledger store
 
-Status: accepted (2026-10-27; owner decision of 2026-10-26); amended 2026-11-06 (no private subnets, results in the ledger until M3) and 2026-11-13 (results in the ledger, build outputs in S3)
+Status: accepted (2026-10-27; owner decision of 2026-10-26); amended 2026-11-06 (no private subnets, results in the ledger until M3), 2026-11-13 (results in the ledger, build outputs in S3), 2026-11-15 (work items keyed by repository) and 2026-11-26 (the M3.5 ledger)
 
 ## Context
 
@@ -58,3 +58,13 @@ The factory works on repositories it does not live in (ADR 0013, ADR 0014), so a
 - Migration `0004_repository.sql` adds `work_items.repository` (`<owner>/<repo>`), backfills `miklospocsaji/vocab`, and replaces the unique issue number and the unique change id with `(repository, issue_number)` and `(repository, change_id)`.
 - Every query that finds a work item takes the repository; handlers pass their target's.
 - The artifact store's keys (`work-items/<change-id>/…`) and the execution names stay as they are. They hold one target today; a second target needs the repository in them too.
+
+## Amendment 2026-11-26: the M3.5 ledger
+
+M3.5 (`docs/m3.5-owner-commands.md`, section 8; ADR 0015 and ADR 0016) adds one migration per change:
+
+- **`0005_comments.sql` (add-owner-commands):** `comments`, one row per owner command the `command` task read, keyed by its GitHub comment id (unique, so a redelivery records and applies nothing twice): the work item or none, the repository and issue, the author, the verb as written, the body as read at receipt, the time, the outcome (`applied`, `busy`, `refused`, `unknown`) and the state it met. The body is stored at receipt, so a later edit or delete on GitHub changes nothing. The task locks the work item's row (`SELECT … FOR UPDATE`) while it decides a command.
+- **`0006_approval_feedback.sql` (add-approval-feedback):** `approvals.outcome` (`approved` or `revise`), required exactly when an approval is closed, and `approved` for every approval closed before; `attempts.comment_ids`, the owner commands a role was given, oldest first.
+- **`0007_resume.sql` (add-work-item-resume):** `work_items.state` takes `aborted`, and `work_items.stopped_in` records the state an `aborted` or `escalated` work item stopped in, null otherwise; rows from before have none. `attempts.outcome` and `approvals.outcome` take `aborted`; an aborted attempt has no failure reason and no result, and counts toward no retry limit.
+- **Compare-and-set state updates.** `setWorkItemState(db, id, to, { from })` changes the row only while it is in `from`, in one statement, and rejects with `StateChanged` otherwise; every handler passes the state it read. Stopping (`aborted`, `escalated`) records `stopped_in`, kept from one stopped state to the other, and any other state clears it. Adopt (`adoptWorkItem`) stores a resumed execution's ARN in the same way. This keeps a stopped worker that writes late from undoing an abort, and two copies of one task from moving a work item twice.
+- `work_items.execution_arn` now names the work item's latest execution, which a `/resume` replaces.

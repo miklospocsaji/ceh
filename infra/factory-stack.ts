@@ -204,6 +204,20 @@ export class FactoryStack extends Stack {
     this.taskDefinition.addToTaskRolePolicy(
       new PolicyStatement({ actions: ["states:SendTaskFailure", "states:SendTaskSuccess"], resources: [stateMachineArn] }),
     );
+    // `/resume` starts an execution of it, and `/abort` (or a closed issue) stops one of its
+    // executions and the ECS task that execution runs (add-work-item-resume). IAM cannot narrow
+    // StopTask to one execution's task: the worker stops only the task it read from that
+    // execution's history, in the factory's cluster.
+    this.taskDefinition.addToTaskRolePolicy(new PolicyStatement({ actions: ["states:StartExecution"], resources: [stateMachineArn] }));
+    this.taskDefinition.addToTaskRolePolicy(
+      new PolicyStatement({
+        actions: ["states:StopExecution", "states:DescribeExecution", "states:GetExecutionHistory"],
+        resources: [this.formatArn({ service: "states", resource: "execution", resourceName: `${STATE_MACHINE_NAME}:*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      }),
+    );
+    this.taskDefinition.addToTaskRolePolicy(
+      new PolicyStatement({ actions: ["ecs:StopTask"], resources: [this.formatArn({ service: "ecs", resource: "task", resourceName: `${this.cluster.clusterName}/*` })] }),
+    );
     // The worker reads and writes build inputs and outputs. ListBucket on the prefix, so a missing
     // key is a 404 rather than a 403: `step` asks whether an outcome exists.
     this.taskDefinition.addToTaskRolePolicy(new PolicyStatement({ actions: ["s3:GetObject", "s3:PutObject"], resources: [workItemObjects] }));
@@ -248,6 +262,8 @@ export class FactoryStack extends Stack {
         FACTORY_GITHUB_APP_ID: String(props.github.appId),
         FACTORY_GITHUB_APP_INSTALLATION_ID: String(props.github.installationId),
         FACTORY_GITHUB_APP_SLUG: props.github.slug,
+        // The state machine a `/resume` starts; its ARN from its name, so no dependency cycle.
+        FACTORY_STATE_MACHINE_ARN: stateMachineArn,
       },
       // Secrets only through `secrets`, injected by ECS at start (ADR 0009).
       secrets: {
@@ -343,7 +359,7 @@ export class FactoryStack extends Stack {
       role: stateMachineRole,
     });
 
-    // The webhook: outside the VPC, no ledger; it starts executions and approve tasks only.
+    // The webhook: outside the VPC, no ledger; it starts executions and `command` tasks only (ADR 0015).
     this.webhook = new NodejsFunction(this, "Webhook", {
       entry: resolve(REPO_ROOT, WEBHOOK_ENTRY),
       handler: "handler",

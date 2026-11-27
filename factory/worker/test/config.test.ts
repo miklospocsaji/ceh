@@ -157,3 +157,22 @@ describe("parseWorkerArgs", () => {
     },
   );
 });
+
+describe("parseWorkerArgs: a closed issue and Adopt (add-work-item-resume)", () => {
+  const ARN = "arn:aws:states:eu-central-1:123456789012:execution:factory-work-item:issue-12-resume-77";
+
+  it("reads `command --closed` and `intake --resume --execution <arn>`", () => {
+    expect(parseWorkerArgs(["command", "--issue", "12", "--closed"])).toEqual({ ok: true, state: "command", issueNumber: 12, closed: true });
+    expect(parseWorkerArgs(["intake", "--issue", "12", "--resume", "--execution", ARN])).toEqual({ ok: true, state: "intake", issueNumber: 12, resume: true, executionArn: ARN });
+  });
+
+  it.each([
+    [["command", "--issue", "12"]],
+    [["command", "--issue", "12", "--comment", "5", "--closed"]],
+    [["intake", "--issue", "12", "--resume"]],
+    [["proposal", "--issue", "12", "--closed"]],
+    [["proposal", "--issue", "12", "--resume"]],
+  ])("refuses %j", (argv) => {
+    expect(parseWorkerArgs(argv).ok).toBe(false);
+  });
+});

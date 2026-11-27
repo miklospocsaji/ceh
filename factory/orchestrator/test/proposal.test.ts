@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProposalResult } from "@ceh/factory-artifacts";
 import { FakeForge } from "@ceh/factory-forge/testing";
-import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, type WorkItemRow } from "@ceh/factory-ledger";
+import { findWorkItemByIssue, LedgerRecorder, listAttempts, migrate, setWorkItemState, StateChanged, type WorkItemRow } from "@ceh/factory-ledger";
 import { createTestDatabase, type TestDatabase } from "@ceh/factory-ledger/testing";
 import { loadRole, renderPrompt, type Role } from "@ceh/factory-roles";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,7 +106,7 @@ beforeEach(() => {
 afterEach(async () => {
   vi.unstubAllEnvs();
   rmSync(root, { recursive: true, force: true });
-  await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks");
+  await db.pool.query("TRUNCATE work_items, attempts, messages, events, approvals, tasks CASCADE");
 });
 
 describe("proposal", () => {
@@ -282,6 +282,23 @@ describe("proposal", () => {
     expect(forge.comments).toHaveLength(1);
     expect(forge.comments[0]?.body).toContain("auth-mode-mismatch");
     expect(remoteHead(CHANGE_ID)).toBe(branchHead);
+  });
+});
+
+describe("proposal: a late write after an abort (add-work-item-resume)", () => {
+  it("refuses the state update of a Proposal whose work item was aborted while it pushed", async () => {
+    const workItem = await workItemInProposal();
+    const { ctx } = context([VALID]);
+    const push = forge.pushBranch.bind(forge);
+    // The owner's /abort lands after the attempt closed, while the branch is pushed.
+    vi.spyOn(forge, "pushBranch").mockImplementation(async (options) => {
+      await push(options);
+      await setWorkItemState(db.pool, workItem.id, "aborted", { from: "proposal" });
+    });
+
+    await expect(proposal(ctx, workItem)).rejects.toThrow(StateChanged);
+
+    expect(await findWorkItemByIssue(db.pool, REPOSITORY, ISSUE.number)).toMatchObject({ state: "aborted", stoppedIn: "proposal" });
   });
 });
 

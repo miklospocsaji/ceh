@@ -9,16 +9,21 @@ import { connectionFromSecret, DATABASE_URL_VAR, LEDGER_SECRET_VAR } from "@ceh/
 import { ESCALATION_REASONS, type EscalationReason } from "@ceh/factory-orchestrator";
 import { loadTarget, repositoryParts, TargetConfigError, type Target } from "@ceh/factory-target";
 
-/** The states this worker runs: one per state machine state (add-cloud-proposal-run, add-build-loop). */
-export const WORKER_STATES = ["intake", "proposal", "await-approval", "approve", "approved", "design", "plan", "step", "open-pr", "escalate"] as const;
+/**
+ * The states this worker runs: one per state machine state (add-cloud-proposal-run, add-build-loop),
+ * and `command`, which the webhook starts for an owner command (add-owner-commands).
+ */
+export const WORKER_STATES = ["intake", "proposal", "await-approval", "command", "approved", "design", "plan", "step", "open-pr", "escalate"] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 
 export const USAGE = [
   "Usage: factory-worker <state> --issue <n> [options]",
   "  intake --issue <n> [--execution <arn>]",
+  "  intake --issue <n> --resume --execution <arn>   (the task token in FACTORY_TASK_TOKEN)",
   "  proposal --issue <n>",
   "  await-approval --issue <n> [--kind proposal|design]   (the task token in FACTORY_TASK_TOKEN)",
-  "  approve --issue <n> --by <login>",
+  "  command --issue <n> --comment <id>",
+  "  command --issue <n> --closed",
   "  approved --issue <n>",
   "  design --issue <n>",
   "  plan --issue <n>                    (the task token in FACTORY_TASK_TOKEN)",
@@ -30,10 +35,11 @@ export const USAGE = [
 
 /** The options each state takes besides `--issue`, and whether it needs them. */
 const OPTIONS: Record<WorkerState, Partial<Record<OptionName, "optional" | "required">>> = {
-  intake: { execution: "optional" },
+  intake: { execution: "optional", resume: "optional" },
   proposal: {},
   "await-approval": { kind: "optional" },
-  approve: { by: "required" },
+  // Exactly one of the two: an owner's comment, or the issue was closed.
+  command: { comment: "optional", closed: "optional" },
   approved: {},
   design: {},
   plan: {},
@@ -41,15 +47,15 @@ const OPTIONS: Record<WorkerState, Partial<Record<OptionName, "optional" | "requ
   "open-pr": {},
   escalate: { reason: "required" },
 };
-type OptionName = "execution" | "by" | "reason" | "task" | "kind";
-const OPTION_NAMES: readonly OptionName[] = ["execution", "by", "reason", "task", "kind"];
+type OptionName = "execution" | "comment" | "reason" | "task" | "kind" | "closed" | "resume";
+const OPTION_NAMES: readonly OptionName[] = ["execution", "comment", "reason", "task", "kind", "closed", "resume"];
 
 /** The approvals `await-approval` opens. */
 export const APPROVAL_KINDS = ["proposal", "design"] as const;
 
 const EXECUTION_ARN = /^arn:aws[a-z-]*:states:[a-z0-9-]+:[0-9]{12}:execution:[A-Za-z0-9_-]+:[A-Za-z0-9_-]{1,80}$/;
-/** A GitHub login: alphanumerics and single hyphens, at most 39 characters. */
-const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+/** A GitHub comment id: a positive integer. */
+const COMMENT_ID = /^[1-9][0-9]{0,15}$/;
 /** A plan's task id, as the plan result schema has it: 1.1, 2.3.1. */
 const TASK_ID = /^\d{1,4}(\.\d{1,4}){1,4}$/;
 
@@ -58,14 +64,18 @@ export interface WorkerArgs {
   issueNumber: number;
   /** intake: the execution running it. */
   executionArn?: string;
-  /** approve: the login that approved, verified as the owner's by the webhook. */
-  by?: string;
+  /** command: the id of the owner's comment; the task reads its text through the Forge. */
+  commentId?: number;
   /** escalate: why, as a fixed code. */
   reason?: EscalationReason;
   /** step: the task's id in the plan. */
   taskId?: string;
   /** await-approval: which approval it opens; defaults to `proposal`. */
   kind?: (typeof APPROVAL_KINDS)[number];
+  /** command: the issue was closed; there is no comment (add-work-item-resume). */
+  closed?: boolean;
+  /** intake: Adopt, for an execution a `/resume` started (add-work-item-resume). */
+  resume?: boolean;
 }
 
 export type ParsedArgs = ({ ok: true } & WorkerArgs) | { ok: false; message: string };
@@ -73,7 +83,7 @@ export type ParsedArgs = ({ ok: true } & WorkerArgs) | { ok: false; message: str
 /** Reads `<state> --issue <n>` and the state's options; never throws. */
 export function parseWorkerArgs(argv: string[]): ParsedArgs {
   let positionals: string[];
-  let values: Partial<Record<"issue" | OptionName, string | undefined>>;
+  let values: Partial<Record<"issue" | Exclude<OptionName, "closed" | "resume">, string | undefined>> & { closed?: boolean; resume?: boolean };
   try {
     const parsed = parseArgs({
       args: argv,
@@ -82,10 +92,12 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
       options: {
         issue: { type: "string" },
         execution: { type: "string" },
-        by: { type: "string" },
+        comment: { type: "string" },
         reason: { type: "string" },
         task: { type: "string" },
         kind: { type: "string" },
+        closed: { type: "boolean" },
+        resume: { type: "boolean" },
       },
     });
     positionals = parsed.positionals;
@@ -108,9 +120,11 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
     if (values[name] !== undefined && options[name] === undefined) return { ok: false, message: `${state} takes no --${name}` };
     if (values[name] === undefined && options[name] === "required") return { ok: false, message: `${state} needs --${name}` };
   }
-  const { execution, by, reason, task, kind } = values;
+  const { execution, comment, reason, task, kind, closed, resume } = values;
+  if (state === "command" && (comment === undefined) === (closed !== true)) return { ok: false, message: "command needs either --comment or --closed" };
+  if (resume === true && execution === undefined) return { ok: false, message: "intake --resume needs --execution" };
   if (execution !== undefined && !EXECUTION_ARN.test(execution)) return { ok: false, message: "--execution must be a Step Functions execution ARN" };
-  if (by !== undefined && !LOGIN.test(by)) return { ok: false, message: "--by must be a GitHub login" };
+  if (comment !== undefined && (!COMMENT_ID.test(comment) || !Number.isSafeInteger(Number(comment)))) return { ok: false, message: "--comment must be a comment id" };
   if (reason !== undefined && !isEscalationReason(reason)) return { ok: false, message: `--reason must be one of ${ESCALATION_REASONS.join(", ")}` };
   if (task !== undefined && !TASK_ID.test(task)) return { ok: false, message: "--task must be a task id such as 1.1" };
   if (kind !== undefined && !isApprovalKind(kind)) return { ok: false, message: `--kind must be one of ${APPROVAL_KINDS.join(", ")}` };
@@ -120,10 +134,12 @@ export function parseWorkerArgs(argv: string[]): ParsedArgs {
     state,
     issueNumber,
     ...(execution === undefined ? {} : { executionArn: execution }),
-    ...(by === undefined ? {} : { by }),
+    ...(comment === undefined ? {} : { commentId: Number(comment) }),
     ...(reason === undefined ? {} : { reason }),
     ...(task === undefined ? {} : { taskId: task }),
     ...(kind === undefined ? {} : { kind }),
+    ...(closed === true ? { closed: true } : {}),
+    ...(resume === true ? { resume: true } : {}),
   };
 }
 

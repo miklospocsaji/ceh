@@ -4,5 +4,5 @@ import type { HandlerContext, Transition } from "./handler.ts";
 
 export async function escalateWith(ctx: HandlerContext, item: WorkItemRow, body: string, reason: string): Promise<Transition> {
   await ctx.forge.comment(item.issueNumber, body);
-  return { kind: "escalate", workItem: await setWorkItemState(ctx.db, item.id, "escalated"), reason };
+  return { kind: "escalate", workItem: await setWorkItemState(ctx.db, item.id, "escalated", { from: item.state }), reason };
 }

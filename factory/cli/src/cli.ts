@@ -1,7 +1,9 @@
 /**
  * The factory CLI, with its dependencies passed in so tests can drive it:
  * - `run --issue <n> --until proposal|design|plan|pr`
- * - `approve --issue <n>`: the owner's approval of a local run, which has no `/approve` comment
+ * - `approve --issue <n>`: the owner's approval of a local run, with no comment
+ * - `command --issue <n> --comment <id>`: an owner command commented on the issue, handled as the
+ *   cloud's `command` task does, against the local ledger; an `/approve` is applied as `approve` is
  * - `cost --issue <n>`
  * Each takes `--target <name>`, a folder under `targets/`; without it, the only target. The
  * target is settled before the ledger or GitHub is touched.
@@ -9,13 +11,13 @@
  */
 import { parseArgs } from "node:util";
 import { findWorkItemByIssue, listAttempts, listAttemptUsage, type AttemptRow, type AttemptUsage, type Db, type WorkItemRow } from "@ceh/factory-ledger";
-import { approveLocally, isRunUntil, RUN_UNTIL, runWorkItem, type RunContext } from "@ceh/factory-orchestrator";
+import { approveLocally, handleCommand, InvalidCommand, isRunUntil, localApprover, localReviser, RUN_UNTIL, runWorkItem, type RunContext } from "@ceh/factory-orchestrator";
 import type { Target } from "@ceh/factory-target";
 
 /** Exit codes of the CLI. */
 export const EXIT_CODES = {
   ok: 0,
-  /** The work item was rejected or is escalated, `approve` found nothing awaiting, or `cost` found no work item. */
+  /** The work item was rejected or is escalated, `approve` found nothing awaiting, `command` was refused its comment, or `cost` found no work item. */
   failed: 1,
   /** The command line was invalid. */
   usage: 2,
@@ -34,7 +36,7 @@ export interface CliEnv {
   loadTarget: (name: string) => Promise<Target>;
   /** Called once the command line and the target are valid, before the ledger is used: migrations. */
   prepare?: () => Promise<void>;
-  /** What `run` and `approve` need besides the ledger and the target. Only they call it, so `cost` needs no GitHub token. */
+  /** What `run`, `approve` and `command` need besides the ledger and the target. Only they call it, so `cost` needs no GitHub token. */
   runContext: (target: Target) => Promise<Omit<RunContext, "db" | "target">>;
 }
 
@@ -42,6 +44,7 @@ export const USAGE = [
   "Usage:",
   `  pnpm factory run --issue <n> --until <${RUN_UNTIL.join("|")}> [--target <name>]`,
   "  pnpm factory approve --issue <n> [--target <name>]",
+  "  pnpm factory command --issue <n> --comment <id> [--target <name>]",
   "  pnpm factory cost --issue <n> [--target <name>]",
   "",
   "--target names a folder under targets/; it may be left out when there is only one.",
@@ -68,6 +71,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       return run(command, target, env);
     case "approve":
       return approve(command, target, env);
+    case "command":
+      return ownerCommand(command, target, env);
     case "cost":
       return cost(command, target, env);
   }
@@ -86,9 +91,14 @@ async function chooseTarget(name: string | undefined, env: CliEnv): Promise<Targ
   return env.loadTarget(only);
 }
 
-type Command = ({ name: "run"; issueNumber: number; until: (typeof RUN_UNTIL)[number] } | { name: "approve"; issueNumber: number } | { name: "cost"; issueNumber: number }) & { target: string | undefined };
+type Command = (
+  | { name: "run"; issueNumber: number; until: (typeof RUN_UNTIL)[number] }
+  | { name: "approve"; issueNumber: number }
+  | { name: "command"; issueNumber: number; commentId: number }
+  | { name: "cost"; issueNumber: number }
+) & { target: string | undefined };
 
-const COMMANDS = ["run", "approve", "cost"] as const;
+const COMMANDS = ["run", "approve", "command", "cost"] as const;
 
 function isCommand(name: string | undefined): name is (typeof COMMANDS)[number] {
   return (COMMANDS as readonly (string | undefined)[]).includes(name);
@@ -99,7 +109,7 @@ function parseCommand(argv: string[]): Command {
     args: argv,
     allowPositionals: true,
     strict: true,
-    options: { issue: { type: "string" }, until: { type: "string" }, target: { type: "string" } },
+    options: { issue: { type: "string" }, until: { type: "string" }, comment: { type: "string" }, target: { type: "string" } },
   });
   const [name, ...rest] = positionals;
   if (rest.length > 0) throw new UsageError(`unexpected argument ${rest[0] ?? ""}`);
@@ -110,10 +120,16 @@ function parseCommand(argv: string[]): Command {
     throw new UsageError("--issue must be an issue number");
   }
 
-  if (name !== "run") {
-    if (values.until !== undefined) throw new UsageError(`${name} takes no --until`);
-    return { name, issueNumber, target: values.target };
+  if (name !== "command" && values.comment !== undefined) throw new UsageError(`${name} takes no --comment`);
+  if (name !== "run" && values.until !== undefined) throw new UsageError(`${name} takes no --until`);
+  if (name === "command") {
+    const commentId = Number(values.comment);
+    if (values.comment === undefined || !/^[1-9][0-9]*$/.test(values.comment) || !Number.isSafeInteger(commentId)) {
+      throw new UsageError("--comment must be a comment id");
+    }
+    return { name, issueNumber, commentId, target: values.target };
   }
+  if (name !== "run") return { name, issueNumber, target: values.target };
   if (values.until === undefined || !isRunUntil(values.until)) {
     throw new UsageError(`--until must be one of: ${RUN_UNTIL.join(", ")}`);
   }
@@ -175,6 +191,37 @@ async function approve(command: Extract<Command, { name: "approve" }>, target: T
       env.err(`factory: ${describe(outcome.workItem)} is escalated: ${outcome.reason}\n`);
       return EXIT_CODES.failed;
   }
+}
+
+/** An owner command, with the same handler, records and replies as the cloud's `command` task. */
+async function ownerCommand(command: Extract<Command, { name: "command" }>, target: Target, env: CliEnv): Promise<number> {
+  const ctx = { ...(await env.runContext(target)), db: env.db, target };
+  let outcome;
+  try {
+    outcome = await handleCommand(
+      {
+        db: env.db,
+        forge: ctx.forge,
+        target,
+        approve: localApprover(ctx),
+        revise: localReviser(),
+        // A question runs its session here, in the subscription mode of ADR 0006.
+        question: { runRole: ctx.runRole, proposalAuthor: ctx.role, architect: ctx.architect, ...(ctx.home === undefined ? {} : { home: ctx.home }) },
+      },
+      command.issueNumber,
+      command.commentId,
+    );
+  } catch (error) {
+    if (!(error instanceof InvalidCommand)) throw error;
+    env.err(`factory: nothing done: ${error.message}\n`);
+    return EXIT_CODES.failed;
+  }
+  // As it is now: an applied /approve has moved it on.
+  const workItem = await findWorkItemByIssue(env.db, target.repository, command.issueNumber);
+  const subject = workItem === undefined ? `Issue #${String(command.issueNumber)} has no work item` : `${describe(workItem)} is ${workItem.state}`;
+  const done = outcome.outcome === "duplicate" ? "handled already, so nothing was done or posted" : `${outcome.outcome}, and answered on the issue`;
+  env.out(`/${outcome.command.written}: ${done}. ${subject}.\n`);
+  return EXIT_CODES.ok;
 }
 
 async function cost(command: Extract<Command, { name: "cost" }>, target: Target, env: CliEnv): Promise<number> {
